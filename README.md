@@ -1,6 +1,6 @@
 # BouncyBot - an IBKR Portable Trading Bot 
 
-**Current release: v3.2.0**
+**Current release: v3.2.0*
 
 ![Simple-view](Images/Trading-Simple-view.png)
 
