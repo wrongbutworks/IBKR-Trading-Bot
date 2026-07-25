@@ -2,6 +2,25 @@
 
 This file summarizes behavior-changing and maintenance releases represented by the repository. Historical implementation notes remain in `docs/legacy/` for traceability. Current behavior is documented in `README.md` and the current guides linked from `docs/README.md`.
 
+## v3.2.1
+
+### Fixed
+
+- Added a conservative continuous-session overlay for `LSE` and `LSEETF`. Date-specific IBKR `liquidHours` still determine holidays, late opens, and earlier closes, but the effective session can no longer extend beyond 08:00-16:30 `Europe/London`. The corrected boundary drives RTH state, entry timing, active-BUY cancellation, Stage-3/Stage-4 pre-close liquidation, and RTH-only ATR collection.
+- Prevented the 30-second RTH metadata cache from leaving an LSE/LSEETF contract marked open after its effective continuous close.
+- Throttled repeated unchanged BUY preflight warnings by cycle and blocker category. The first warning is written immediately, repeated warnings are limited to one per 60 seconds, and the blocker continues to be enforced on every cadence.
+- Added the distinct `PreflightBlocked` BUY status for conditions that prevent a live broker submission. `SubmitFailed` remains reserved for an actual submission attempt that fails before broker acceptance can be confirmed.
+
+### Safety and compatibility
+
+- The LSE/LSEETF policy only narrows IBKR's supplied session and fails closed if its verified continuous-session boundary cannot be applied. Other SMART primary exchanges continue to use their IBKR session metadata unless a separately verified venue policy is added.
+- No SQLite schema object changes. Existing v3.2.0 databases remain forward-compatible; the new status value is stored in existing text fields.
+
+### Documentation and tests
+
+- Converted the three production-incident strict expected failures into ordinary passing regressions and added focused coverage for the VWRA continuous-close incident, earlier IBKR closes, non-LSE behavior, cache-boundary closure, malformed policy metadata, monotonic-time-zero audit logging, audit re-emission after the throttle interval, and `PreflightBlocked` persistence without an order intent.
+- Added [`docs/V3_2_1_INCIDENT_GAP_CORRECTIONS.md`](docs/V3_2_1_INCIDENT_GAP_CORRECTIONS.md) and archived the v3.2.0 release note under `docs/legacy/`.
+
 ## v3.2.0
 
 ### Same-release bugscan correction
@@ -32,7 +51,7 @@ This file summarizes behavior-changing and maintenance releases represented by t
 ### Documentation and tests
 
 - Added deterministic coverage for USD/EUR validation, exact contract search and qualification, SMART/order-type capability checks, European session parsing, non-U.S. RTH failure, size-step normalization, database currency inference and locking, cross-currency commission handling, GUI currency display, active-cycle recovery boundaries, and unlimited ten-second reconnect attempts.
-- Added [`docs/V3_2_0_EUR_SMART_AND_RECONNECT.md`](docs/V3_2_0_EUR_SMART_AND_RECONNECT.md) and archived the v3.1.2 release note under `docs/legacy/`.
+- Added [`docs/V3_2_0_EUR_SMART_AND_RECONNECT.md`](docs/legacy/V3_2_0_EUR_SMART_AND_RECONNECT.md) and archived the v3.1.2 release note under `docs/legacy/`.
 
 ## v3.1.2
 

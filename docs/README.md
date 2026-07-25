@@ -1,6 +1,6 @@
 # Documentation index
 
-The files in this directory describe the current v3.2.0 behavior unless explicitly marked otherwise. The root of `docs/` is intentionally limited to current operating, design, recovery, and verification material. Superseded release notes are stored under [`legacy/`](legacy/README.md).
+The files in this directory describe the current v3.2.1 behavior unless explicitly marked otherwise. The root of `docs/` is intentionally limited to current operating, design, recovery, and verification material. Superseded release notes are stored under [`legacy/`](legacy/README.md).
 
 When documents disagree, use this source-of-truth order:
 
@@ -43,12 +43,13 @@ When documents disagree, use this source-of-truth order:
 | [`CSV_SIMULATION_SCENARIO_MATRIX.md`](CSV_SIMULATION_SCENARIO_MATRIX.md) | Deterministic price paths, expected outcomes, and coverage categories |
 | [`AUTOMATED_TEST_COVERAGE.md`](AUTOMATED_TEST_COVERAGE.md) | Per-module callable coverage, test layers, artifacts, and gate semantics |
 | [`OFFLINE_BEHAVIOR_TESTS.md`](OFFLINE_BEHAVIOR_TESTS.md) | Replay, generated-state, crash, fault, soak, mutation, and isolation tests |
+| [`PRODUCTION_INCIDENT_REPLAY_TESTS.md`](PRODUCTION_INCIDENT_REPLAY_TESTS.md) | Sanitized production-incident replays, privacy controls, historical migration corpus, and resolved-incident regressions |
 | [`TEST_PLAN.md`](TEST_PLAN.md) | Manual verification checklist, especially for Windows and IBKR integration |
 | [`CODE_REVIEW_NOTES.md`](CODE_REVIEW_NOTES.md) | Maintainer review boundaries and documentation-maintenance rules |
 
 ## Current release note
 
-[`V3_2_0_EUR_SMART_AND_RECONNECT.md`](V3_2_0_EUR_SMART_AND_RECONNECT.md) records exact USD/EUR ordinary-stock SMART contract support, the one-currency-per-database rule, broker capability and session checks, fixed ten-second indefinite local reconnect, compatibility, and verification scope.
+[`V3_2_1_INCIDENT_GAP_CORRECTIONS.md`](V3_2_1_INCIDENT_GAP_CORRECTIONS.md) records the LSE/LSEETF continuous-session boundary, repeated-preflight audit throttling, the `PreflightBlocked` status, compatibility, and verification scope.
 
 ## Archived documentation
 
