@@ -1,6 +1,6 @@
 # BouncyBot - an IBKR Portable Trading Bot 
 
-**Current release: v3.2.0**
+**Current release: v3.2.1**
 
 ![Simple-view](Images/Trading-Simple-view.png)
 
@@ -189,7 +189,9 @@ After upstream restoration, normal processing remains paused until the applicati
 
 The controller evaluates configured blockers before a BUY is transmitted. The top-right **Trading** status shows a compact blocker summary; its tooltip lists all currently evaluated blockers. Depending on configuration and runtime state, blockers include:
 
-The regular-session open/close window comes from the exact qualified IBKR contract's date-specific `liquidHours` and `timeZoneId`. The same parsed boundaries drive the first-minutes, last-minutes, and cancel-before-close controls, so early closes are respected. The weekday 09:30–16:00 New York fallback is retained only for recognized U.S. equity primary exchanges. A non-U.S. contract with missing or invalid session metadata fails closed instead of inheriting U.S. hours.
+The regular-session open/close window comes from the exact qualified IBKR contract's date-specific `liquidHours` and `timeZoneId`. For `LSE` and `LSEETF`, v3.2.1 intersects that broker window with the verified 08:00-16:30 `Europe/London` continuous session, so ordinary timing-sensitive orders do not use a later auction/post-continuous `liquidHours` endpoint. An IBKR holiday or earlier close still wins. The same effective boundaries drive the first-minutes, last-minutes, cancel-before-close, and RTH-only ATR controls. The weekday 09:30-16:00 New York fallback is retained only for recognized U.S. equity primary exchanges. A non-U.S. contract with missing or invalid session metadata fails closed instead of inheriting U.S. hours.
+
+When a BUY is prevented before any live order is submitted, the cycle now records `PreflightBlocked` rather than `SubmitFailed`. Repeated unchanged preflight warnings for the same cycle and blocker category are written to the audit log at most once per 60 seconds; the guard itself is still evaluated and enforced on every strategy cadence.
 
 - a disconnected local API socket, lost Gateway-to-IBKR server link, or incomplete post-reconnect reconciliation;
 - no actual post-connect/post-recovery ticker event, or missing, invalid, cached-only, or stale selected price;
@@ -411,9 +413,9 @@ Run:
 .\run_all_tests.bat
 ```
 
-This performs Python compilation, every collected pytest test (including the bounded soak tests) with `ResourceWarning` checks, statement and branch coverage with a 75% minimum, a generated per-callable coverage check, a six-mutant safety smoke gate, all deterministic CSV simulations, Ruff, and Pyright. The Windows full-test path applies no pytest marker filter. Every effective executable callable under `app/` and in `main.py` must be entered by at least one test. Failure at any required stage produces a nonzero result.
+This performs Python compilation, every collected pytest test (including the bounded soak tests) with `ResourceWarning` checks, statement and branch coverage with a 75% minimum, a generated per-callable coverage check, a seventeen-mutant safety smoke gate, all deterministic CSV simulations, Ruff, and Pyright. The Windows full-test path applies no pytest marker filter. Every effective executable callable under `app/` and in `main.py` must be entered by at least one test. Failure at any required stage produces a nonzero result.
 
-The offline suite includes broker-event permutations, generated controller state sequences, numerical/payload properties, recovery decision matrices, differential simulations, crash/restart and schema-migration cases, storage fault injection, Gateway outage sequences, and multi-instance isolation. The CSV gate validates 58 explicit scenario contracts across 54 price-path files, including threshold edges, gap fills, partial fills, RTH transitions, protective exits, slippage buffers, sizing, reinvestment, and zero-trailing market-order branches. It does not launch the GUI, connect to IBKR, or use real market/account/order data. See [Deterministic offline behavior tests](docs/OFFLINE_BEHAVIOR_TESTS.md).
+The offline suite includes broker-event permutations, generated controller state sequences, numerical/payload properties, recovery decision matrices, differential simulations, crash/restart and schema-migration cases, storage fault injection, Gateway outage sequences, and multi-instance isolation. The CSV gate validates 58 explicit scenario contracts across 54 price-path files, including threshold edges, gap fills, partial fills, RTH transitions, protective exits, slippage buffers, sizing, reinvestment, and zero-trailing market-order branches. It does not launch the GUI, connect to IBKR, or use real market/account/order data. See [Deterministic offline behavior tests](docs/OFFLINE_BEHAVIOR_TESTS.md) and [production incident replay tests](docs/PRODUCTION_INCIDENT_REPLAY_TESTS.md).
 
 ### Direct Python tests
 
@@ -448,7 +450,7 @@ dist\IBKRTradingBot\IBKRTradingBot.exe
 and creates the versioned release folder and final ZIP using the same naming pattern as IBKR Market Replay Lab:
 
 ```text
-release\IBKRTradingBot_3.2.0_Windows\
+release\IBKRTradingBot_3.2.1_Windows\
   GUI\IBKRTradingBot.exe
   docs\
   README.md
@@ -457,7 +459,7 @@ release\IBKRTradingBot_3.2.0_Windows\
   SECURITY.md
   QUICK_START.txt
 
-release\IBKRTradingBot_3.2.0_Windows.zip
+release\IBKRTradingBot_3.2.1_Windows.zip
 release\SHA256SUMS.txt
 ```
 
@@ -526,7 +528,8 @@ Superseded release-specific documents are indexed under [docs/legacy](docs/legac
 
 ## Release history
 
-- [v3.2.0 release note](docs/V3_2_0_EUR_SMART_AND_RECONNECT.md) — exact USD/EUR ordinary-stock SMART contracts, one contract currency per portable database, contract capability/session checks, and fixed ten-second indefinite local reconnect.
+- [v3.2.1 release note](docs/V3_2_1_INCIDENT_GAP_CORRECTIONS.md) — LSE/LSEETF continuous-session timing, throttled repeated preflight audit warnings, and the distinct `PreflightBlocked` status.
+- [v3.2.0 release note](docs/legacy/V3_2_0_EUR_SMART_AND_RECONNECT.md) — exact USD/EUR ordinary-stock SMART contracts, one contract currency per portable database, contract capability/session checks, and fixed ten-second indefinite local reconnect.
 - [v3.1.2 release note](docs/legacy/V3_1_2_FILL_RECONCILIATION_AND_STAGE3_CLOSE.md) — terminal BUY settlement, idempotent late fills/commissions, strict full-OrderRef isolation, stable diagnostics, corrected execution timestamps, and profitable Stage-3 pre-close liquidation.
 - [v3.1.1 release note](docs/legacy/V3_1_1_IBKR_ORDER_VALIDATION.md) — market-rule order-price normalization, strict what-if validation, broker rejection diagnostics, and no-fill rejection circuit breaker.
 - [v3.1.0 release note](docs/legacy/V3_1_0_CLOSE_BEFORE_RTH_LIQUIDATION.md) — optional Stage-4 cancel-confirm-market liquidation before the contract-specific RTH close.

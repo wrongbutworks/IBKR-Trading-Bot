@@ -5406,7 +5406,7 @@ class CycleAuditDialog(QDialog):
             lines.extend([
                 "BUILT-IN EXAMPLE CYCLE",
                 "=" * 80,
-                "This is synthetic v3.2.0 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
+                "This is synthetic v3.2.1 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
                 "The scenario models a liquid U.S. stock pullback, a multi-execution trailing BUY fill, a temporary protective SELL, and a modest trailing-stop profit exit.",
                 "",
             ])
@@ -5518,7 +5518,7 @@ class MainWindow(QMainWindow):
         )
         self._system_shutdown_in_progress = False
         self._last_system_shutdown_session_key = ""
-        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.2.0")
+        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.2.1")
         self.resize(1440, 950)
 
         self._autosave_timer = QTimer(self)
