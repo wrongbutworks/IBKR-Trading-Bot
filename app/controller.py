@@ -4262,6 +4262,10 @@ class TradingController:
                 "primary_exchange": contract.primary_exchange,
                 "local_symbol": contract.local_symbol,
                 "trading_class": contract.trading_class,
+                "description": getattr(contract, "description", ""),
+                "industry": getattr(contract, "industry", ""),
+                "category": getattr(contract, "category", ""),
+                "subcategory": getattr(contract, "subcategory", ""),
                 "min_tick": getattr(contract, "min_tick", 0.01),
                 "exchange": str(
                     getattr(contract, "exchange", "")

@@ -130,6 +130,10 @@ class QualifiedContract:
     time_zone: str = ""
     min_size: float = 1.0
     size_increment: float = 1.0
+    description: str = ""
+    industry: str = ""
+    category: str = ""
+    subcategory: str = ""
 
 
 @dataclass(slots=True)
@@ -1645,6 +1649,14 @@ class IbAsyncTwsAdapter(BrokerAdapter):
             time_zone=time_zone,
             min_size=min_size,
             size_increment=size_increment,
+            description=str(
+                getattr(detail, "longName", "")
+                or getattr(contract, "description", "")
+                or ""
+            ).strip(),
+            industry=str(getattr(detail, "industry", "") or "").strip(),
+            category=str(getattr(detail, "category", "") or "").strip(),
+            subcategory=str(getattr(detail, "subcategory", "") or "").strip(),
         )
 
     @staticmethod
@@ -2009,6 +2021,10 @@ class IbAsyncTwsAdapter(BrokerAdapter):
                 local_symbol=str(getattr(variant, "localSymbol", "") or ""),
                 trading_class=str(getattr(variant, "tradingClass", "") or ""),
                 min_tick=float(getattr(contract, "min_tick", 0.01) or 0.01),
+                description=str(getattr(contract, "description", "") or ""),
+                industry=str(getattr(contract, "industry", "") or ""),
+                category=str(getattr(contract, "category", "") or ""),
+                subcategory=str(getattr(contract, "subcategory", "") or ""),
             )
             self._variant_cache[key] = result
             return result

@@ -1,8 +1,8 @@
 # Automated test coverage specification
 
-This document defines the automated verification scope for v3.2.1. It is the maintainer-facing map between the application modules, test layers, and repository quality gates.
+This document defines the automated verification scope for v3.2.2. It is the maintainer-facing map between the application modules, test layers, and repository quality gates.
 
-The v3.2.1 offline test architecture includes focused coverage for shutdown checkpoints, event-driven worker scheduling, independent cadences, nonblocking broker reads, GUI responsiveness, broker connectivity, reconciliation, flowchart history selection, the optional Stage-3/Stage-4 close-before-RTH workflows, market-rule price normalization, strict what-if interpretation, broker error retention, rejection circuit breaking, exact USD/EUR SMART contract selection, one-currency database enforcement, atomic resume-checkpoint currency validation, qualified-currency market-data fallbacks, persistent commission-mismatch idempotence, contract capability/session validation, and fixed ten-second indefinite reconnect behavior. Tests use temporary databases, deterministic clocks and data, protocol-shaped broker doubles, and headless Qt doubles. They do not connect to IBKR, launch TWS/Gateway, or transmit orders.
+The v3.2.2 offline test architecture includes focused coverage for shutdown checkpoints, event-driven worker scheduling, independent cadences, nonblocking broker reads, GUI responsiveness, broker connectivity, reconciliation, flowchart history selection, the optional Stage-3/Stage-4 close-before-RTH workflows, market-rule price normalization, strict what-if interpretation, broker error retention, rejection circuit breaking, exact USD/EUR SMART contract selection, one-currency database enforcement, atomic resume-checkpoint currency validation, qualified-currency market-data fallbacks, persistent commission-mismatch idempotence, contract capability/session validation, and fixed ten-second indefinite reconnect behavior. Tests use temporary databases, deterministic clocks and data, protocol-shaped broker doubles, and headless Qt doubles. They do not connect to IBKR, launch TWS/Gateway, or transmit orders.
 
 ## Test objectives
 
@@ -25,7 +25,7 @@ The callable gate is derived from the effective function map in `coverage.json`.
 |---|---:|---|
 | `app/controller.py` | 205 / 205 | Event-driven command queue, independent broker/strategy/database/GUI/maintenance cadences, lifecycle, connectivity, guards, recovery, execution reconstruction, order-side effects, snapshots |
 | `app/flowchart_model.py` | 10 / 10 | Stage-card construction, labels, details, filtering |
-| `app/gui.py` | 345 / 345 | Formatting, blocker/recovery classification, widget state, command gating, timelines, panels, dialogs, layout helpers |
+| `app/gui.py` | 348 / 348 | Formatting, blocker/recovery classification, widget state, command gating, timelines, panels, dialogs, layout helpers |
 | `app/ib_adapter.py` | 130 / 130 | Data normalization, event ownership, connectivity, market data, contracts, orders, executions, positions |
 | `app/ib_platform.py` | 11 / 11 | Profiles, path discovery, socket probing, process-launch outcomes |
 | `app/lockfile.py` | 8 / 8 | Acquisition, stale-lock handling, release, context-manager behavior |
@@ -38,11 +38,11 @@ The callable gate is derived from the effective function map in `coverage.json`.
 | `app/strategy.py` | 23 / 23 | Five-stage transitions, fills, partial fills, editable settings, error states |
 | `app/timeline_scaling.py` | 28 / 28 | Parsing, filtering, robust bounds, downsampling, marker/time-axis placement |
 | `main.py` | 3 / 3 | Stable palette setup, single-instance startup, window lifecycle, cleanup |
-| **Total** | **921 / 921** | All effective executable application callables |
+| **Total** | **927 / 927** | All effective executable application callables |
 
-The counts are a snapshot of v3.2.1. The gate recalculates them from the current source and coverage report on every full test run. Adding a callable without a test causes the callable-coverage step to fail.
+The counts are a snapshot of v3.2.2. The gate recalculates them from the current source and coverage report on every full test run. Adding a callable without a test causes the callable-coverage step to fail.
 
-The final v3.2.1 release verification executed **1,026/1,026** collected pytest cases with no expected failures, measured **77.7%** combined statement/branch coverage, entered **921/921** executable application callables, killed **17/17** targeted safety mutants, and passed **58/58** deterministic simulation contracts across 54 CSV price paths.
+The final v3.2.2 release verification executed **1,041/1,041** collected pytest cases with no expected failures, measured **77.9%** combined statement/branch coverage, entered **927/927** executable application callables, killed **17/17** targeted safety mutants, and passed **58/58** deterministic simulation contracts across 54 CSV price paths.
 
 ## Test layers
 
@@ -107,6 +107,10 @@ Eleven regressions cover broker-returned symbol/route/primary-exchange mismatche
 ### v3.2.1 production-incident correction layer
 
 Focused tests convert the three former strict expected failures into ordinary regressions. They verify the 08:00-16:30 `Europe/London` continuous-session cap for `LSE` and `LSEETF`, preservation of earlier IBKR closes, unchanged behavior for other primary exchanges, fail-closed malformed policy metadata, effective-close enforcement through the short RTH cache, stable one-per-60-second BUY preflight audit throttling including monotonic time zero, no repeated price-normalization audit rows while delayed data is already known to block the BUY, and the distinct `PreflightBlocked` status without an order intent.
+
+### v3.2.2 GUI information and audit-layout layer
+
+Focused tests cover qualified-contract long-name and classification propagation, exact instrument-identity formatting in the price monitor, shared large styling for ticker and selected price, compact content-based Timeline columns, bounded width for the guard/risk table, remaining-width allocation for the stage-transition table, and top-aligned Orders, Executions, and Decision events tabs. The new GUI helpers and all three lazy tab builders are entered through headless Qt doubles.
 
 ## Full validation sequence
 

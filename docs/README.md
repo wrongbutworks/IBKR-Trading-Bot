@@ -1,6 +1,6 @@
 # Documentation index
 
-The files in this directory describe the current v3.2.1 behavior unless explicitly marked otherwise. The root of `docs/` is intentionally limited to current operating, design, recovery, and verification material. Superseded release notes are stored under [`legacy/`](legacy/README.md).
+The files in this directory describe the current v3.2.2 behavior unless explicitly marked otherwise. The root of `docs/` is intentionally limited to current operating, design, recovery, and verification material. Superseded release notes are stored under [`legacy/`](legacy/README.md).
 
 When documents disagree, use this source-of-truth order:
 
@@ -49,8 +49,8 @@ When documents disagree, use this source-of-truth order:
 
 ## Current release note
 
-[`V3_2_1_INCIDENT_GAP_CORRECTIONS.md`](V3_2_1_INCIDENT_GAP_CORRECTIONS.md) records the LSE/LSEETF continuous-session boundary, repeated-preflight audit throttling, the `PreflightBlocked` status, compatibility, and verification scope.
+[`V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md`](V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) records the richer price-monitor contract identity, compact Cycle Audit layout, BouncyBot application icon and About information, README logo, legacy-document cleanup, compatibility, and verification scope.
 
 ## Archived documentation
 
-The [`legacy/`](legacy/README.md) directory contains older release-specific notes and retained historical reports. The v3.0.19 and v3.0.18 release notes remain available at their existing repository paths for traceability. Those files may accurately describe the release that introduced a feature, but labels, defaults, layouts, tests, and limitations in them can be obsolete. They are not the current operating specification.
+The [`legacy/`](legacy/README.md) directory contains all superseded release-specific notes and retained historical reports. Only the current v3.2.2 release note remains in the root of `docs/`. Archived files may accurately describe the release that introduced a feature, but labels, defaults, layouts, tests, and limitations in them can be obsolete. They are not the current operating specification.
