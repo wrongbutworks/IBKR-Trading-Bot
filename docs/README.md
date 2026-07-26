@@ -1,6 +1,6 @@
 # Documentation index
 
-The files in this directory describe the current v3.2.2 behavior unless explicitly marked otherwise. The root of `docs/` is intentionally limited to current operating, design, recovery, and verification material. Superseded release notes are stored under [`legacy/`](legacy/README.md).
+The files in this directory describe the current v3.3.0 behavior unless explicitly marked otherwise. The root of `docs/` is intentionally limited to current operating, design, recovery, and verification material. Superseded release notes are stored under [`legacy/`](legacy/README.md).
 
 When documents disagree, use this source-of-truth order:
 
@@ -49,8 +49,8 @@ When documents disagree, use this source-of-truth order:
 
 ## Current release note
 
-[`V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md`](V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) records the richer price-monitor contract identity, compact Cycle Audit layout, BouncyBot application icon and About information, README logo, legacy-document cleanup, compatibility, and verification scope.
+[`V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md`](V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) records automatic and View-menu-selectable Fusion themes, the non-overlapping About-logo layout, full-width Cycle Audit Timeline tables, the internally scrolling Market capture tab, the Windows release-root shortcut, runtime-only image packaging, compatibility, and verification scope.
 
 ## Archived documentation
 
-The [`legacy/`](legacy/README.md) directory contains all superseded release-specific notes and retained historical reports. Only the current v3.2.2 release note remains in the root of `docs/`. Archived files may accurately describe the release that introduced a feature, but labels, defaults, layouts, tests, and limitations in them can be obsolete. They are not the current operating specification.
+The [`legacy/`](legacy/README.md) directory contains all superseded release-specific notes and retained historical reports. Only the current v3.3.0 release note remains in the root of `docs/`. Archived files may accurately describe the release that introduced a feature, but labels, defaults, layouts, tests, and limitations in them can be obsolete. They are not the current operating specification.

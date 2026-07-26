@@ -1,4 +1,4 @@
-"""Same-release v3.2.2 branding, About dialog, and documentation cleanup."""
+"""v3.3.0 branding, About layout, packaging, and documentation cleanup."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 GUI_SOURCE = (ROOT / "app" / "gui.py").read_text(encoding="utf-8")
 MAIN_SOURCE = (ROOT / "main.py").read_text(encoding="utf-8")
 BUILD_SOURCE = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
-CURRENT_NOTE = ROOT / "docs" / "V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md"
+CURRENT_NOTE = ROOT / "docs" / "V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md"
 LEGACY_DIR = ROOT / "docs" / "legacy"
 LOGO_PATH = ROOT / "Images" / "BouncyBot_logo.png"
 ICON_PNG_PATH = ROOT / "Images" / "BouncyBot_app_icon.png"
@@ -37,7 +37,7 @@ def _png_dimensions(path: Path) -> tuple[int, int]:
     return struct.unpack(">II", data[16:24])
 
 
-def test_submitted_logo_and_multisize_windows_icon_are_packaged_assets() -> None:
+def test_submitted_logo_and_multisize_windows_icon_are_source_assets() -> None:
     assert _png_dimensions(LOGO_PATH) == (1536, 1024)
     assert _png_dimensions(ICON_PNG_PATH) == (1024, 1024)
 
@@ -60,7 +60,7 @@ def test_about_dialog_contains_logo_links_version_and_readme_support_data(gui_mo
     dialog = gui_module.AboutInfoDialog()
 
     assert dialog.title_label.text() == "BouncyBot - IBKR Portable Trading Bot"
-    assert dialog.version_label.text() == "Version 3.2.2"
+    assert dialog.version_label.text() == "Version 3.3.0"
     assert gui_module.BOUNCYBOT_GITHUB_URL in dialog.repository_link.text()
     assert gui_module.BOUNCYBOT_REFERRAL_URL in dialog.referral_link.text()
     assert set(dialog.support_address_fields) == {
@@ -72,6 +72,24 @@ def test_about_dialog_contains_logo_links_version_and_readme_support_data(gui_mo
     for label, address in gui_module.BOUNCYBOT_SUPPORT_ADDRESSES:
         assert dialog.support_address_fields[label].text() == address
         assert address in README
+
+
+def test_about_logo_uses_a_bounded_panel_before_the_title_rows() -> None:
+    about_source = GUI_SOURCE[
+        GUI_SOURCE.index("class AboutInfoDialog") : GUI_SOURCE.index("class StopDialog")
+    ]
+    assert 'self.logo_panel.setObjectName("AboutLogoPanel")' in about_source
+    assert "self.logo_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in about_source
+    assert "self.logo_label.setAlignment(Qt.AlignCenter)" in about_source
+    assert "self.logo_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)" in about_source
+    assert "scaled_logo = pixmap.scaled(520, 240" in about_source
+    assert "self.logo_label.setFixedSize(scaled_logo.size())" in about_source
+    assert "logo_height = max(180, int(scaled_logo.height()) + 14)" in about_source
+    assert "self.logo_panel.setMinimumHeight(logo_height)" in about_source
+    assert "self.logo_panel.setMaximumHeight(logo_height)" in about_source
+    assert "layout.addWidget(self.logo_panel)" in about_source
+    assert "layout.addWidget(self.logo_panel," not in about_source
+    assert "self.title_label.setWordWrap(True)" in about_source
 
 
 def test_about_menu_opens_info_dialog(gui_module, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,16 +146,33 @@ def test_main_applies_branding_icon_when_asset_exists(monkeypatch: pytest.Monkey
     assert "_apply_application_icon(app)" in MAIN_SOURCE
 
 
-def test_windows_build_sets_exe_icon_bundles_assets_and_copies_images() -> None:
+def test_windows_build_bundles_only_runtime_images_and_omits_source_images_root() -> None:
     assert '"--icon=Images\\BouncyBot_app_icon.ico"' in BUILD_SOURCE
     assert '"--add-data=Images\\BouncyBot_app_icon.png;Images"' in BUILD_SOURCE
     assert '"--add-data=Images\\BouncyBot_logo.png;Images"' in BUILD_SOURCE
-    assert 'Copy-Item -Path (Join-Path $root "Images")' in BUILD_SOURCE
+    assert 'Copy-Item -Path (Join-Path $root "Images")' not in BUILD_SOURCE
+    assert 'Get-ChildItem -Path $guiTarget -Recurse -File -Filter "BouncyBot_app_icon.png"' in BUILD_SOURCE
+    assert 'Get-ChildItem -Path $guiTarget -Recurse -File -Filter "BouncyBot_logo.png"' in BUILD_SOURCE
+    assert 'if (Test-Path (Join-Path $releaseRoot "Images"))' in BUILD_SOURCE
+
+
+def test_windows_build_creates_release_root_shortcut_and_checksums_it() -> None:
+    assert '$shortcutPath = Join-Path $releaseRoot "BouncyBot.lnk"' in BUILD_SOURCE
+    assert '$relativeExePath = "GUI\\$appName.exe"' in BUILD_SOURCE
+    assert "interface IShellLinkW" in BUILD_SOURCE
+    assert "shellLink.SetPath(absoluteTarget)" in BUILD_SOURCE
+    assert "shellLink.SetRelativePath(relativeTarget, 0)" in BUILD_SOURCE
+    assert "[BouncyBot.Build.PortableShortcut]::Create(" in BUILD_SOURCE
+    assert "WScript.Shell" not in BUILD_SOURCE
+    assert "foreach ($file in @($releaseExePath, $shortcutPath, $releaseZip))" in BUILD_SOURCE
+    assert "Double-click BouncyBot.lnk" in BUILD_SOURCE
+    assert "GUI\\IBKRTradingBot.exe" in BUILD_SOURCE
 
 
 def test_only_current_release_note_remains_in_docs_root() -> None:
     root_version_notes = sorted(path.name for path in (ROOT / "docs").glob("V3_*") if path.is_file())
     assert root_version_notes == [CURRENT_NOTE.name]
+    assert (LEGACY_DIR / "V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md").is_file()
 
     for name in (
         "V3_0_17_FLOWCHART_HISTORY_SELECTOR.md",
@@ -146,10 +181,3 @@ def test_only_current_release_note_remains_in_docs_root() -> None:
     ):
         assert (LEGACY_DIR / name).is_file()
         assert not (ROOT / "docs" / name).exists()
-
-
-def test_same_release_version_is_retained() -> None:
-    assert "BouncyBot - IBKR Portable Trading Bot v3.2.2" in GUI_SOURCE
-    assert '**Current release: v3.2.2**' in README
-    assert '$version = "3.2.2"' in BUILD_SOURCE
-    assert "application branding" in CURRENT_NOTE.read_text(encoding="utf-8")

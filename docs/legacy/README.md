@@ -2,10 +2,11 @@
 
 These files document superseded releases and implementation history. They are retained for traceability, but they may describe old labels, defaults, layouts, tests, or limitations.
 
-For current behavior, use the [project README](../../README.md), the [current documentation index](../README.md), the [changelog](../../CHANGELOG.md), and the current [`v3.2.2 release note`](../V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md).
+For current behavior, use the [project README](../../README.md), the [current documentation index](../README.md), the [changelog](../../CHANGELOG.md), and the current [`v3.3.0 release note`](../V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md).
 
 ## Version 3 release notes
 
+- [`V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md`](V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) — v3.2.2 richer price-monitor identity, compact audit layout, BouncyBot branding, About information, and documentation cleanup
 - [`V3_2_1_INCIDENT_GAP_CORRECTIONS.md`](V3_2_1_INCIDENT_GAP_CORRECTIONS.md) — v3.2.1 LSE/LSEETF continuous-session timing, repeated-preflight audit throttling, and the distinct `PreflightBlocked` status
 - [`V3_2_0_EUR_SMART_AND_RECONNECT.md`](V3_2_0_EUR_SMART_AND_RECONNECT.md) — v3.2.0 exact USD/EUR ordinary-stock SMART contracts, one-currency database enforcement, capability/session validation, and fixed ten-second reconnect
 - [`V3_1_2_FILL_RECONCILIATION_AND_STAGE3_CLOSE.md`](V3_1_2_FILL_RECONCILIATION_AND_STAGE3_CLOSE.md) — v3.1.2 terminal BUY settlement, idempotent late fills/commissions, strict full-OrderRef isolation, corrected execution timestamps, and profitable Stage-3 pre-close liquidation
