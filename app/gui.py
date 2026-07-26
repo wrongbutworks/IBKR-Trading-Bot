@@ -26,7 +26,7 @@ from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStyleFactory,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -116,8 +117,6 @@ STAGE_LABELS = [
 QT_WIDGET_SIZE_MAX = 16_777_215
 
 
-
-
 class NoWheelEditFilter(QObject):
     """Prevent mouse-wheel changes on editable fields.
 
@@ -135,6 +134,44 @@ class NoWheelEditFilter(QObject):
 CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€"}
 ACTIVE_CONTRACT_CURRENCY = "USD"
 CURRENCY_SYMBOL = CURRENCY_SYMBOLS[ACTIVE_CONTRACT_CURRENCY]
+
+APP_VERSION = "3.3.0"
+DARK_MODE_APP_PROPERTY = "bouncybotDarkMode"
+
+LIGHT_FUSION_PALETTE_COLORS = {
+    "Window": "#f6f7f9",
+    "WindowText": "#111827",
+    "Base": "#ffffff",
+    "AlternateBase": "#f3f4f6",
+    "ToolTipBase": "#ffffff",
+    "ToolTipText": "#111827",
+    "Text": "#111827",
+    "Button": "#ffffff",
+    "ButtonText": "#111827",
+    "BrightText": "#ffffff",
+    "Highlight": "#2563eb",
+    "HighlightedText": "#ffffff",
+    "PlaceholderText": "#6b7280",
+}
+
+# Neutral Fusion-style greys intentionally replace the previous navy/slate
+# theme. The palette remains close to Qt's conventional Fusion dark examples,
+# while the existing semantic blue/green/amber/red state colors stay visible.
+DARK_FUSION_PALETTE_COLORS = {
+    "Window": "#353535",
+    "WindowText": "#f0f0f0",
+    "Base": "#232323",
+    "AlternateBase": "#303030",
+    "ToolTipBase": "#2b2b2b",
+    "ToolTipText": "#f0f0f0",
+    "Text": "#f0f0f0",
+    "Button": "#3d3d3d",
+    "ButtonText": "#f0f0f0",
+    "BrightText": "#ffffff",
+    "Highlight": "#2a82da",
+    "HighlightedText": "#ffffff",
+    "PlaceholderText": "#a0a0a0",
+}
 
 BOUNCYBOT_GITHUB_URL = "https://github.com/IBKR-BouncyBot/IBKR-Trading-Bot"
 BOUNCYBOT_REFERRAL_URL = "https://ibkr.com/referral/gerrit585"
@@ -166,6 +203,184 @@ def _set_active_contract_currency(value: Any) -> str:
 def _currency_prefix(value: Any = None) -> str:
     currency = normalize_contract_currency(value, fallback=ACTIVE_CONTRACT_CURRENCY)
     return f"{CURRENCY_SYMBOLS.get(currency, currency)} "
+
+
+def _dark_mode_enabled() -> bool:
+    """Return the application-level system-theme state set by ``main``."""
+    try:
+        app = QApplication.instance()
+        return bool(app is not None and app.property(DARK_MODE_APP_PROPERTY))
+    except Exception:
+        return False
+
+
+def _apply_fusion_application_palette(app: QApplication, dark: bool) -> bool:
+    """Apply the shared light or neutral Fusion-dark application palette."""
+    dark = bool(dark)
+    style = QStyleFactory.create("Fusion")
+    if style is not None:
+        app.setStyle(style)
+    palette = QPalette()
+    colors = DARK_FUSION_PALETTE_COLORS if dark else LIGHT_FUSION_PALETTE_COLORS
+    for role_name, color in colors.items():
+        palette.setColor(getattr(QPalette, role_name), QColor(color))
+    app.setPalette(palette)
+    app.setProperty(DARK_MODE_APP_PROPERTY, dark)
+    return dark
+
+
+_FUSION_DARK_PAINT_MAP = {
+    "#0b1220": "#1e1e1e",
+    "#0f172a": "#2b2b2b",
+    "#111827": "#353535",
+    "#172033": "#3d3d3d",
+    "#1f2937": "#2b2b2b",
+    "#273449": "#404040",
+    "#334155": "#4a4a4a",
+    "#374151": "#4a4a4a",
+    "#450a0a": "#4a2e2e",
+    "#431407": "#4a3328",
+    "#422006": "#4a4030",
+    "#2e1065": "#40364d",
+    "#172554": "#314a60",
+    "#1e3a5f": "#355a78",
+    "#123524": "#2d4635",
+    "#064e3b": "#315b49",
+    "#475569": "#5a5a5a",
+    "#64748b": "#777777",
+    "#94a3b8": "#a0a0a0",
+    "#9ca3af": "#a6a6a6",
+    "#aeb8c8": "#b8b8b8",
+    "#cbd5e1": "#d0d0d0",
+    "#d1d5db": "#d5d5d5",
+    "#e5e7eb": "#e5e5e5",
+    "#f3f4f6": "#f0f0f0",
+    "#f9fafb": "#f7f7f7",
+}
+
+
+def _theme_hex(light: str, dark: str) -> str:
+    """Select a light/dark color and normalize dark paint to Fusion greys."""
+    if not _dark_mode_enabled():
+        return light
+    return _FUSION_DARK_PAINT_MAP.get(str(dark).lower(), dark)
+
+
+def _theme_color(light: str, dark: str) -> QColor:
+    return QColor(_theme_hex(light, dark))
+
+
+_DARK_QSS_BACKGROUND = {
+    "#111827": "#353535",
+    "#1f2937": "#3d3d3d",
+    "#f6f7f9": "#353535",
+    "#ffffff": "#2b2b2b",
+    "#f9fafb": "#2b2b2b",
+    "#f8fafc": "#303030",
+    "#f3f4f6": "#404040",
+    "#f1f3f6": "#454545",
+    "#eef0f4": "#404040",
+    "#e7e9ee": "#454545",
+    "#e0f2fe": "#3f4b56",
+    "#eef2ff": "#3b4148",
+    "#eff6ff": "#314a60",
+    "#dbeafe": "#355a78",
+    "#ecfdf5": "#2d4635",
+    "#d1fae5": "#315b49",
+    "#fffbeb": "#4a4030",
+    "#fff7ed": "#4a3328",
+    "#fef2f2": "#4a2e2e",
+    "#fee2e2": "#4a2e2e",
+    "#f5f3ff": "#40364d",
+    "#202124": "#1e1e1e",
+    "#0f172a": "#252525",
+    "#9ca3af": "#606060",
+}
+_DARK_QSS_FOREGROUND = {
+    "#ffffff": "#ffffff",
+    "#f9fafb": "#f7f7f7",
+    "#f3f4f6": "#f0f0f0",
+    "#111827": "#f0f0f0",
+    "#1f2937": "#e5e5e5",
+    "#2f3744": "#d5d5d5",
+    "#3d4552": "#d0d0d0",
+    "#374151": "#d5d5d5",
+    "#4b5563": "#cfcfcf",
+    "#5b6270": "#b8b8b8",
+    "#6b7280": "#a6a6a6",
+    "#1e3a8a": "#9ccaf2",
+    "#064e3b": "#9dd5b0",
+    "#78350f": "#e8cf86",
+    "#7f1d1d": "#efb0b0",
+    "#92400e": "#e6b75f",
+    "#8a4b00": "#e6b75f",
+    "#059669": "#66c98f",
+    "#d97706": "#dfa84b",
+    "#dc2626": "#e47777",
+}
+_DARK_QSS_BORDER = {
+    "#111827": "#555555",
+    "#1f2937": "#d0d0d0",
+    "#c7cbd1": "#5a5a5a",
+    "#d1d5db": "#5a5a5a",
+    "#d7dae0": "#4a4a4a",
+    "#cbd5e1": "#5a5a5a",
+    "#94a3b8": "#777777",
+    "#e5e7eb": "#4a4a4a",
+    "#e2e8f0": "#555555",
+    "#9ca3af": "#777777",
+    "#6b7280": "#a0a0a0",
+    "#64748b": "#a0a0a0",
+    "#1d4ed8": "#2a82da",
+    "#2563eb": "#4a9fe6",
+    "#16a34a": "#62bd7e",
+    "#d97706": "#d9a441",
+    "#dc2626": "#df6b6b",
+    "#fcd34d": "#d9a441",
+    "#6ee7b7": "#66c98f",
+    "#fecaca": "#df7777",
+    "#a5b4fc": "#8b9bd8",
+}
+_DARK_QSS_GENERIC = {
+    **_DARK_QSS_BACKGROUND,
+    **_DARK_QSS_FOREGROUND,
+    **_DARK_QSS_BORDER,
+    "#047857": "#66c98f",
+    "#16a34a": "#62bd7e",
+    "#1d4ed8": "#4a9fe6",
+    "#2563eb": "#4a9fe6",
+    "#7c3aed": "#9c83d8",
+    "#b45309": "#d9a441",
+    "#c2410c": "#dc8356",
+    "#d97706": "#d9a441",
+    "#dc2626": "#df6b6b",
+}
+_QSS_HEX_PATTERN = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def _dark_stylesheet(light_stylesheet: str) -> str:
+    """Convert the validated light stylesheet to its dark-mode counterpart."""
+    converted: list[str] = []
+    for line in light_stylesheet.splitlines():
+        stripped = line.lstrip().lower()
+        if stripped.startswith(("background", "selection-background")):
+            mapping = _DARK_QSS_BACKGROUND
+        elif stripped.startswith(("color:", "selection-color")):
+            mapping = _DARK_QSS_FOREGROUND
+        elif stripped.startswith(("border", "gridline-color")):
+            mapping = _DARK_QSS_BORDER
+        else:
+            mapping = _DARK_QSS_GENERIC
+        converted.append(
+            _QSS_HEX_PATTERN.sub(
+                lambda match: mapping.get(
+                    match.group(0).lower(),
+                    _DARK_QSS_GENERIC.get(match.group(0).lower(), match.group(0)),
+                ),
+                line,
+            )
+        )
+    return "\n".join(converted)
 
 
 SEMANTIC_COLORS = {
@@ -1135,6 +1350,9 @@ def _auto_size_table_columns(
     maximum: int = 420,
     extra: int = 14,
     last_maximum: Optional[int] = None,
+    column_minimums: Optional[tuple[int, ...]] = None,
+    column_maximums: Optional[tuple[int, ...]] = None,
+    horizontal_scroll: Any = Qt.ScrollBarAsNeeded,
 ) -> None:
     """Size table columns to their contents without stretching empty space.
 
@@ -1151,42 +1369,21 @@ def _auto_size_table_columns(
         last_col = table.columnCount() - 1
         for col in range(table.columnCount()):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
-            cap = int(last_maximum if last_maximum is not None and col == last_col else maximum)
+            floor = int(column_minimums[col]) if column_minimums and col < len(column_minimums) else int(minimum)
+            if column_maximums and col < len(column_maximums):
+                cap = int(column_maximums[col])
+            else:
+                cap = int(last_maximum if last_maximum is not None and col == last_col else maximum)
             width = int(table.columnWidth(col)) + int(extra)
-            table.setColumnWidth(col, max(int(minimum), min(cap, width)))
-        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            table.setColumnWidth(col, max(floor, min(cap, width)))
+        table.setHorizontalScrollBarPolicy(horizontal_scroll)
     except Exception:
-        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setHorizontalScrollBarPolicy(horizontal_scroll)
 
 
 def _resize_table_columns_for_available_width(table: QTableWidget, *, min_last_width: int = 160) -> None:
     """Backward-compatible wrapper for content-based table autosizing."""
     _auto_size_table_columns(table, minimum=64, maximum=360, last_maximum=max(360, int(min_last_width)))
-
-
-def _fit_table_width_to_columns(
-    table: QTableWidget,
-    *,
-    minimum: int = 280,
-    maximum: int = 480,
-    padding: int = 24,
-) -> None:
-    """Limit a compact table to the width required by its visible columns."""
-    try:
-        content_width = sum(max(0, int(table.columnWidth(column))) for column in range(table.columnCount()))
-        frame_width = max(0, int(table.frameWidth())) * 2
-        scrollbar_width = 0
-        scrollbar = table.verticalScrollBar()
-        if scrollbar is not None:
-            scrollbar_width = max(0, int(scrollbar.sizeHint().width()))
-        target = content_width + frame_width + scrollbar_width + int(padding)
-        target = max(int(minimum), min(int(maximum), target))
-        table.setMinimumWidth(target)
-        table.setMaximumWidth(target)
-        vertical_policy = table.sizePolicy().verticalPolicy()
-        table.setSizePolicy(QSizePolicy.Fixed, vertical_policy)
-    except Exception:
-        table.setMaximumWidth(int(maximum))
 
 
 def _cap_table_columns_for_horizontal_scroll(table: QTableWidget, *, minimum: int = 70, maximum: int = 220) -> None:
@@ -1246,27 +1443,27 @@ class StageRibbon(QWidget):
             label = self.labels.get(stage_value, stage_value)
             if terminal_error:
                 state = "BLOCKED"
-                fill = "#fef2f2"
-                accent = SEMANTIC_COLORS["risk"]
-                text_color = "#7f1d1d"
+                fill = _theme_hex("#fef2f2", "#450a0a")
+                accent = _theme_hex(SEMANTIC_COLORS["risk"], "#f87171")
+                text_color = _theme_hex("#7f1d1d", "#fecaca")
                 border_width = 2
             elif active_idx == idx:
                 state = "CURRENT"
-                fill = "#eff6ff"
-                accent = SEMANTIC_COLORS["active"]
-                text_color = "#111827"
+                fill = _theme_hex("#eff6ff", "#172554")
+                accent = _theme_hex(SEMANTIC_COLORS["active"], "#60a5fa")
+                text_color = _theme_hex("#111827", "#f3f4f6")
                 border_width = 4
             elif active_idx is not None and idx < active_idx:
                 state = "DONE"
-                fill = "#ecfdf5"
-                accent = SEMANTIC_COLORS["success"]
-                text_color = "#064e3b"
+                fill = _theme_hex("#ecfdf5", "#123524")
+                accent = _theme_hex(SEMANTIC_COLORS["success"], "#4ade80")
+                text_color = _theme_hex("#064e3b", "#a7f3d0")
                 border_width = 2
             else:
                 state = "PENDING"
-                fill = "#f3f4f6"
-                accent = "#9ca3af"
-                text_color = "#374151"
+                fill = _theme_hex("#f3f4f6", "#273449")
+                accent = _theme_hex("#9ca3af", "#64748b")
+                text_color = _theme_hex("#374151", "#d1d5db")
                 border_width = 1
             card.setObjectName("StageActive" if state == "CURRENT" else "StageInactive")
             card.setText(f"{label}\n{state}")
@@ -1276,6 +1473,11 @@ class StageRibbon(QWidget):
             )
             card.style().unpolish(card)
             card.style().polish(card)
+
+    def refresh_theme(self) -> None:
+        stage = self._last_stage
+        self._last_stage = object()
+        self.set_stage(stage if isinstance(stage, str) or stage is None else None)
 
 
 class StatusPill(QFrame):
@@ -1304,22 +1506,28 @@ class StatusPill(QFrame):
 
     def set_state(self, state: str) -> None:
         colors = {
-            "success": ("#ecfdf5", "#16a34a", "#064e3b"),
-            "active": ("#eff6ff", "#2563eb", "#1e3a8a"),
-            "waiting": ("#fffbeb", "#d97706", "#78350f"),
-            "risk": ("#fef2f2", "#dc2626", "#7f1d1d"),
-            "inactive": ("#f3f4f6", "#9ca3af", "#374151"),
+            "success": (_theme_hex("#ecfdf5", "#123524"), _theme_hex("#16a34a", "#4ade80"), _theme_hex("#064e3b", "#a7f3d0")),
+            "active": (_theme_hex("#eff6ff", "#172554"), _theme_hex("#2563eb", "#60a5fa"), _theme_hex("#1e3a8a", "#bfdbfe")),
+            "waiting": (_theme_hex("#fffbeb", "#422006"), _theme_hex("#d97706", "#f59e0b"), _theme_hex("#78350f", "#fde68a")),
+            "risk": (_theme_hex("#fef2f2", "#450a0a"), _theme_hex("#dc2626", "#f87171"), _theme_hex("#7f1d1d", "#fecaca")),
+            "inactive": (_theme_hex("#f3f4f6", "#273449"), _theme_hex("#9ca3af", "#64748b"), _theme_hex("#374151", "#d1d5db")),
         }
         effective_state = state if state in colors else "inactive"
         if effective_state == self._state:
             return
         self._state = effective_state
         fill, border, text = colors[effective_state]
+        title_text = _theme_hex("#4b5563", "#cbd5e1")
         self.setStyleSheet(
             f"QFrame#StatusPill {{ background: {fill}; border: 1px solid {border}; border-radius: 8px; }}"
-            f"QLabel#StatusPillTitle {{ color: #4b5563; font-size: 10px; font-weight: 700; }}"
+            f"QLabel#StatusPillTitle {{ color: {title_text}; font-size: 10px; font-weight: 700; }}"
             f"QLabel#StatusPillValue {{ color: {text}; font-size: 12px; font-weight: 800; }}"
         )
+
+    def refresh_theme(self) -> None:
+        state = self._state or "inactive"
+        self._state = None
+        self.set_state(state)
 
 
 class LiveStatusBar(QFrame):
@@ -1572,12 +1780,12 @@ class CommandStepCard(QFrame):
             return
         self._last_state_signature = signature
         colors = {
-            "done": ("#ecfdf5", "#16a34a", "#064e3b"),
-            "ready": ("#eff6ff", "#2563eb", "#1e3a8a"),
-            "blocked": ("#fef2f2", "#dc2626", "#7f1d1d"),
-            "error": ("#fef2f2", "#dc2626", "#7f1d1d"),
-            "locked": ("#f3f4f6", "#6b7280", "#374151"),
-            "not ready": ("#f3f4f6", "#9ca3af", "#374151"),
+            "done": (_theme_hex("#ecfdf5", "#123524"), _theme_hex("#16a34a", "#4ade80"), _theme_hex("#064e3b", "#a7f3d0")),
+            "ready": (_theme_hex("#eff6ff", "#172554"), _theme_hex("#2563eb", "#60a5fa"), _theme_hex("#1e3a8a", "#bfdbfe")),
+            "blocked": (_theme_hex("#fef2f2", "#450a0a"), _theme_hex("#dc2626", "#f87171"), _theme_hex("#7f1d1d", "#fecaca")),
+            "error": (_theme_hex("#fef2f2", "#450a0a"), _theme_hex("#dc2626", "#f87171"), _theme_hex("#7f1d1d", "#fecaca")),
+            "locked": (_theme_hex("#f3f4f6", "#273449"), _theme_hex("#6b7280", "#94a3b8"), _theme_hex("#374151", "#d1d5db")),
+            "not ready": (_theme_hex("#f3f4f6", "#273449"), _theme_hex("#9ca3af", "#64748b"), _theme_hex("#374151", "#d1d5db")),
         }
         fill, border, text = colors.get(normalized, colors["not ready"])
         self.setStyleSheet(
@@ -1587,6 +1795,14 @@ class CommandStepCard(QFrame):
         self.state.setText(display_state)
         self.detail.setText(detail)
         self.button.setEnabled(enabled)
+
+    def refresh_theme(self) -> None:
+        signature = self._last_state_signature
+        if signature is None:
+            return
+        self._last_state_signature = None
+        state, enabled, detail = signature
+        self.set_state(state, enabled, detail)
 
 
 class CurrentStagePanel(QGroupBox):
@@ -2399,14 +2615,14 @@ class CycleTimelineWidget(QWidget):
     @staticmethod
     def _marker_color(kind: str) -> QColor:
         if kind == "buy":
-            return QColor("#16a34a")
+            return _theme_color("#16a34a", "#4ade80")
         if kind == "sell":
-            return QColor("#059669")
+            return _theme_color("#059669", "#34d399")
         if kind == "protective":
-            return QColor("#dc2626")
+            return _theme_color("#dc2626", "#f87171")
         if kind == "drop":
-            return QColor("#d97706")
-        return QColor("#2563eb")
+            return _theme_color("#d97706", "#f59e0b")
+        return _theme_color("#2563eb", "#60a5fa")
 
     def _draw_small_label(self, painter: QPainter, x: float, y: float, text: str, color: QColor) -> None:
         painter.save()
@@ -2416,10 +2632,10 @@ class CycleTimelineWidget(QWidget):
         metrics = painter.fontMetrics()
         width = min(190, max(46, metrics.horizontalAdvance(text) + 10))
         rect = QRectF(x - width / 2.0, y, width, 32)
-        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
         painter.setPen(QPen(color, 1))
         painter.drawRoundedRect(rect, 5, 5)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         painter.drawText(rect.adjusted(4, 2, -4, -2), Qt.AlignCenter | Qt.TextWordWrap, text)
         painter.restore()
 
@@ -2471,12 +2687,12 @@ class CycleTimelineWidget(QWidget):
         if nearest is not None:
             text = f"{nearest[2]}\n" + "\n".join(cursor_lines)
         painter.save()
-        painter.setPen(QPen(QColor("#64748b"), 1, Qt.DashLine))
+        painter.setPen(QPen(_theme_color("#64748b", "#94a3b8"), 1, Qt.DashLine))
         painter.drawLine(QPointF(hover_x, plot.top()), QPointF(hover_x, plot.bottom()))
         painter.drawLine(QPointF(plot.left(), hover_y), QPointF(plot.right(), hover_y))
         if nearest is not None:
-            painter.setPen(QPen(QColor("#111827"), 1))
-            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.setPen(QPen(_theme_color("#111827", "#f3f4f6"), 1))
+            painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
             painter.drawEllipse(QPointF(nearest[0], nearest[1]), 4, 4)
         font = QFont(painter.font())
         font.setPointSize(8)
@@ -2490,10 +2706,10 @@ class CycleTimelineWidget(QWidget):
         label_x = max(plot.left() + 4, min(label_x, plot.right() - label_width - 4))
         label_y = max(plot.top() + 4, min(label_y, plot.bottom() - label_height - 4))
         label_rect = QRectF(label_x, label_y, label_width, label_height)
-        painter.setBrush(QBrush(QColor("#ffffff")))
-        painter.setPen(QPen(QColor("#94a3b8"), 1))
+        painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
+        painter.setPen(QPen(_theme_color("#94a3b8", "#64748b"), 1))
         painter.drawRoundedRect(label_rect, 6, 6)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         painter.drawText(label_rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignTop, "\n".join(lines))
         painter.restore()
 
@@ -2501,15 +2717,15 @@ class CycleTimelineWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         rect = QRectF(self.rect()).adjusted(10, 10, -10, -10)
-        painter.fillRect(rect, QColor("#ffffff"))
-        painter.setPen(QPen(QColor("#d1d5db"), 1))
+        painter.fillRect(rect, _theme_color("#ffffff", "#1f2937"))
+        painter.setPen(QPen(_theme_color("#d1d5db", "#475569"), 1))
         painter.drawRoundedRect(rect, 10, 10)
 
         title_font = QFont(painter.font())
         title_font.setBold(True)
         title_font.setPointSize(10)
         painter.setFont(title_font)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         title = "Visual buy/sell timeline per cycle" if self.show_market_graph else "App actions timeline per cycle"
         painter.drawText(rect.adjusted(12, 8, -12, -8), Qt.AlignTop | Qt.AlignLeft, title)
 
@@ -2537,7 +2753,7 @@ class CycleTimelineWidget(QWidget):
         if self.show_market_graph and self._off_axis_timed_item_count:
             source += f" Timed app item(s) outside the plotted market-data window are pinned to the nearest edge: {self._off_axis_timed_item_count}."
         painter.setFont(QFont())
-        painter.setPen(QColor("#5b6270"))
+        painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
         painter.drawText(rect.adjusted(12, 28, -12, -8), Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap, source)
 
         path_prices = [point.get("price") for point in self._path_points]
@@ -2548,7 +2764,7 @@ class CycleTimelineWidget(QWidget):
         path_bounds = display_price_bounds(path_prices, ()) if self.show_market_graph and path_prices else None
         action_bounds = display_price_bounds(action_price_items, self._important_prices()) if action_price_items else None
         if path_bounds is None and action_bounds is None:
-            painter.setPen(QColor("#6b7280"))
+            painter.setPen(_theme_color("#6b7280", "#9ca3af"))
             painter.drawText(rect, Qt.AlignCenter, "No positive price markers are available for this cycle.")
             return
 
@@ -2590,26 +2806,26 @@ class CycleTimelineWidget(QWidget):
 
         def draw_plot_frame(plot: QRectF, bounds: Optional[tuple[float, float]], title: str, empty: str) -> None:
             painter.save()
-            painter.setBrush(QBrush(QColor("#ffffff")))
-            painter.setPen(QPen(QColor("#d1d5db"), 1))
+            painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
+            painter.setPen(QPen(_theme_color("#d1d5db", "#475569"), 1))
             painter.drawRect(plot)
             label_font = QFont(painter.font())
             label_font.setBold(True)
             painter.setFont(label_font)
-            painter.setPen(QColor("#111827"))
+            painter.setPen(_theme_color("#111827", "#f3f4f6"))
             painter.drawText(QRectF(plot.left(), plot.top() - 22, plot.width(), 20), Qt.AlignLeft | Qt.AlignVCenter, title)
             painter.setFont(QFont())
             if bounds is None:
-                painter.setPen(QColor("#6b7280"))
+                painter.setPen(_theme_color("#6b7280", "#9ca3af"))
                 painter.drawText(plot, Qt.AlignCenter | Qt.TextWordWrap, empty)
                 painter.restore()
                 return
             min_v, max_v = bounds
-            painter.setPen(QPen(QColor("#e5e7eb"), 1))
+            painter.setPen(QPen(_theme_color("#e5e7eb", "#374151"), 1))
             for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
                 y = plot.bottom() - plot.height() * frac
                 painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
-            painter.setPen(QColor("#6b7280"))
+            painter.setPen(_theme_color("#6b7280", "#9ca3af"))
             painter.drawText(QRectF(rect.left() + 8, plot.top() - 4, axis_width, 20), Qt.AlignRight | Qt.AlignVCenter, _format_currency(max_v))
             painter.drawText(QRectF(rect.left() + 8, plot.bottom() - 16, axis_width, 20), Qt.AlignRight | Qt.AlignVCenter, _format_currency(min_v))
             painter.restore()
@@ -2620,14 +2836,14 @@ class CycleTimelineWidget(QWidget):
             start_t, end_t = self._axis_time_window
             mid_t = start_t + (end_t - start_t) / 2.0
             painter.save()
-            painter.setPen(QPen(QColor("#d1d5db"), 1))
+            painter.setPen(QPen(_theme_color("#d1d5db", "#475569"), 1))
             for pos, ts in ((0.08, start_t), (0.52, mid_t), (0.96, end_t)):
                 x_tick = self._x_for_position(plot.left(), plot.right(), pos)
                 painter.drawLine(QPointF(x_tick, plot.bottom()), QPointF(x_tick, plot.bottom() + 7))
                 label_rect = QRectF(x_tick - 82, plot.bottom() + 10, 164, 34)
-                painter.setPen(QColor("#6b7280"))
+                painter.setPen(_theme_color("#6b7280", "#9ca3af"))
                 painter.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, self._format_axis_time(ts))
-                painter.setPen(QPen(QColor("#d1d5db"), 1))
+                painter.setPen(QPen(_theme_color("#d1d5db", "#475569"), 1))
             painter.restore()
 
         def y_for(plot: QRectF, bounds: Optional[tuple[float, float]], price: Any) -> float:
@@ -2657,7 +2873,7 @@ class CycleTimelineWidget(QWidget):
 
         if self._axis_time_window is not None:
             painter.save()
-            painter.setPen(QPen(QColor("#e2e8f0"), 1, Qt.DashLine))
+            painter.setPen(QPen(_theme_color("#e2e8f0", "#334155"), 1, Qt.DashLine))
             for position in (0.08, 0.52, 0.96):
                 if market_plot is not None:
                     market_x = self._x_for_position(market_plot.left(), market_plot.right(), position)
@@ -2670,7 +2886,7 @@ class CycleTimelineWidget(QWidget):
         action_hover_targets: list[tuple[float, float, str]] = []
 
         if market_plot is not None and path_bounds is not None and len(self._path_points) >= 2:
-            painter.setPen(QPen(QColor("#2563eb"), 2))
+            painter.setPen(QPen(_theme_color("#2563eb", "#60a5fa"), 2))
             previous: Optional[QPointF] = None
             for idx, point in enumerate(self._path_points):
                 x = x_for(market_plot, 0, idx, len(self._path_points), point)
@@ -2684,13 +2900,13 @@ class CycleTimelineWidget(QWidget):
             point = self._path_points[0]
             x = x_for(market_plot, 0, 0, 1, point)
             y = y_for(market_plot, path_bounds, point.get("price"))
-            painter.setPen(QPen(QColor("#2563eb"), 2))
+            painter.setPen(QPen(_theme_color("#2563eb", "#60a5fa"), 2))
             painter.drawEllipse(QPointF(x, y), 4, 4)
             market_hover_targets.append((x, y, f"Market data\n{self._format_axis_time(point.get('time'))}\n{_format_currency(point.get('price'))}"))
 
         for idx, transition in enumerate(self._transitions[:18]):
             x = x_for(action_plot, 2, idx, max(1, len(self._transitions)), transition)
-            painter.setPen(QPen(QColor("#93c5fd"), 1, Qt.DashLine))
+            painter.setPen(QPen(_theme_color("#93c5fd", "#60a5fa"), 1, Qt.DashLine))
             painter.drawLine(QPointF(x, action_plot.top()), QPointF(x, action_plot.bottom()))
             y = y_for(action_plot, action_bounds, transition.get("price"))
             action_hover_targets.append((x, y, f"Stage transition\n{self._format_axis_time(transition.get('time'))}\n{_compact_text(transition.get('label') or transition.get('event_type'), 56)}"))
@@ -2698,13 +2914,13 @@ class CycleTimelineWidget(QWidget):
         for idx, block in enumerate(self._risk_blocks[:12]):
             x = x_for(action_plot, 3, idx, max(1, len(self._risk_blocks)), block)
             y = y_for(action_plot, action_bounds, block.get("price"))
-            painter.setBrush(QBrush(QColor("#fef2f2")))
-            painter.setPen(QPen(QColor("#dc2626"), 2))
+            painter.setBrush(QBrush(_theme_color("#fef2f2", "#450a0a")))
+            painter.setPen(QPen(_theme_color("#dc2626", "#f87171"), 2))
             painter.drawRect(QRectF(x - 5, y - 5, 10, 10))
             action_hover_targets.append((x, y, f"Risk/guard\n{self._format_axis_time(block.get('time'))}\n{_compact_text(block.get('label') or 'Guard', 56)}"))
             if not self.compact:
                 label_y = max(action_plot.top() + 4, min(y - 40, action_plot.bottom() - 18))
-                self._draw_small_label(painter, x, label_y, _compact_text(block.get("label") or "Guard", 24), QColor("#dc2626"))
+                self._draw_small_label(painter, x, label_y, _compact_text(block.get("label") or "Guard", 24), _theme_color("#dc2626", "#f87171"))
 
         marker_label_rects: list[QRectF] = []
         for idx, marker in enumerate(self._markers):
@@ -2716,7 +2932,7 @@ class CycleTimelineWidget(QWidget):
             radius = 7 if self.compact else 8
             painter.drawEllipse(QPointF(x, y), radius, radius)
             label = f"{marker.get('label')}\n{_format_currency(marker.get('price'))}"
-            painter.setPen(QColor("#111827"))
+            painter.setPen(_theme_color("#111827", "#f3f4f6"))
             action_hover_targets.append((x, y, f"{marker.get('label')}\n{self._format_axis_time(marker.get('time'))}\n{_format_currency(marker.get('price'))}"))
             self._draw_marker_label(painter, action_plot, x, y, label, idx, marker_label_rects)
 
@@ -2738,7 +2954,7 @@ class CycleTimelineWidget(QWidget):
             ])
             if self.show_market_graph and self._hidden_path_points:
                 legend.append(f"Hidden off-scale rows: {self._hidden_path_points}")
-            painter.setPen(QColor("#374151"))
+            painter.setPen(_theme_color("#374151", "#d1d5db"))
             painter.drawText(rect.adjusted(12, rect.height() - 24, -12, -6), Qt.AlignLeft | Qt.AlignBottom, " | ".join(legend))
 
 
@@ -3015,14 +3231,14 @@ class ProfitGuardWidget(QWidget):
     def _draw_block(self, painter: QPainter, rect: QRectF, title: str, value: str, small: str, color: QColor) -> None:
         painter.save()
         painter.setPen(QPen(color, 1.5))
-        painter.setBrush(QColor("#ffffff"))
+        painter.setBrush(_theme_color("#ffffff", "#1f2937"))
         painter.drawRoundedRect(rect, 8, 8)
 
         title_font = QFont(painter.font())
         title_font.setBold(True)
         title_font.setPointSize(8)
         painter.setFont(title_font)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         painter.drawText(rect.adjusted(7, 6, -7, -50), Qt.AlignCenter | Qt.TextWordWrap, title)
 
         value_font = QFont(painter.font())
@@ -3036,7 +3252,7 @@ class ProfitGuardWidget(QWidget):
         small_font.setBold(False)
         small_font.setPointSize(7)
         painter.setFont(small_font)
-        painter.setPen(QColor("#4b5563"))
+        painter.setPen(_theme_color("#4b5563", "#cbd5e1"))
         painter.drawText(rect.adjusted(7, 58, -7, -5), Qt.AlignCenter | Qt.TextWordWrap, small)
         painter.restore()
 
@@ -3046,7 +3262,7 @@ class ProfitGuardWidget(QWidget):
         font.setBold(True)
         font.setPointSize(9)
         painter.setFont(font)
-        painter.setPen(QColor("#374151"))
+        painter.setPen(_theme_color("#374151", "#d1d5db"))
         painter.drawText(QRectF(x, y, 88, 28), Qt.AlignLeft | Qt.AlignVCenter, text)
         painter.restore()
 
@@ -3064,12 +3280,12 @@ class ProfitGuardWidget(QWidget):
         if nearest is not None:
             text = f"{nearest[2]}\nCursor {_format_currency(price_at_cursor)}"
         painter.save()
-        painter.setPen(QPen(QColor("#64748b"), 1, Qt.DashLine))
+        painter.setPen(QPen(_theme_color("#64748b", "#94a3b8"), 1, Qt.DashLine))
         painter.drawLine(QPointF(hover_x, plot.top()), QPointF(hover_x, plot.bottom()))
         painter.drawLine(QPointF(plot.left(), hover_y), QPointF(plot.right(), hover_y))
         if nearest is not None:
-            painter.setPen(QPen(QColor("#111827"), 1))
-            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.setPen(QPen(_theme_color("#111827", "#f3f4f6"), 1))
+            painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
             painter.drawEllipse(QPointF(nearest[0], nearest[1]), 4, 4)
         font = QFont(painter.font())
         font.setPointSize(8)
@@ -3083,10 +3299,10 @@ class ProfitGuardWidget(QWidget):
         label_x = max(plot.left() + 4, min(label_x, plot.right() - label_width - 4))
         label_y = max(plot.top() + 4, min(label_y, plot.bottom() - label_height - 4))
         label_rect = QRectF(label_x, label_y, label_width, label_height)
-        painter.setBrush(QBrush(QColor("#ffffff")))
-        painter.setPen(QPen(QColor("#94a3b8"), 1))
+        painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
+        painter.setPen(QPen(_theme_color("#94a3b8", "#64748b"), 1))
         painter.drawRoundedRect(label_rect, 6, 6)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         painter.drawText(label_rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignTop, "\n".join(lines))
         painter.restore()
 
@@ -3094,8 +3310,8 @@ class ProfitGuardWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         rect = self.rect().adjusted(6, 6, -6, -6)
-        painter.fillRect(rect, QColor("#ffffff"))
-        painter.setPen(QPen(QColor("#c7cbd1"), 1))
+        painter.fillRect(rect, _theme_color("#ffffff", "#1f2937"))
+        painter.setPen(QPen(_theme_color("#c7cbd1", "#475569"), 1))
         painter.drawRoundedRect(QRectF(rect), 8, 8)
 
         levels = projected_minimum_profit_levels(
@@ -3119,14 +3335,14 @@ class ProfitGuardWidget(QWidget):
         title_font.setBold(True)
         title_font.setPointSize(11)
         painter.setFont(title_font)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         painter.drawText(rect.adjusted(12, 8, -12, -8), Qt.AlignLeft | Qt.AlignTop, "Strategy input map")
 
         small_font = QFont(painter.font())
         small_font.setBold(False)
         small_font.setPointSize(8)
         painter.setFont(small_font)
-        painter.setPen(QColor("#5b6270"))
+        painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
         painter.drawText(
             rect.adjusted(12, 34, -12, -6),
             Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
@@ -3151,28 +3367,28 @@ class ProfitGuardWidget(QWidget):
         self._draw_lane_label(painter, rect.left() + 16, safety_y + 24, "Safety")
 
         entry_blocks = [
-            ("Anchor", _format_price(anchor), "0.00%", QColor("#374151")),
-            ("Drop trigger", _format_price(drop), f"-{self.initial_drop_pct:.2f}%", QColor("#c2410c")),
-            (("BUY market ref" if self.buy_rebound_pct <= 0 else "BUY trailing-stop"), _format_price(projected_buy), ("trailing OFF" if self.buy_rebound_pct <= 0 else f"rebound {self.buy_rebound_pct:.2f}%"), QColor("#7c3aed")),
-            ("Sizing price", _format_price(sizing_price), (f"slip +{self.slippage_buffer_pct:.2f}%" if self.slippage_buffer_enabled else "no slippage buffer"), QColor("#475569")),
+            ("Anchor", _format_price(anchor), "0.00%", _theme_color("#374151", "#d1d5db")),
+            ("Drop trigger", _format_price(drop), f"-{self.initial_drop_pct:.2f}%", _theme_color("#c2410c", "#fb923c")),
+            (("BUY market ref" if self.buy_rebound_pct <= 0 else "BUY trailing-stop"), _format_price(projected_buy), ("trailing OFF" if self.buy_rebound_pct <= 0 else f"rebound {self.buy_rebound_pct:.2f}%"), _theme_color("#7c3aed", "#a78bfa")),
+            ("Sizing price", _format_price(sizing_price), (f"slip +{self.slippage_buffer_pct:.2f}%" if self.slippage_buffer_enabled else "no slippage buffer"), _theme_color("#475569", "#cbd5e1")),
         ]
         exit_blocks = [
-            ("Buy reference", _format_price(projected_buy), self._pct_vs(projected_buy, anchor), QColor("#7c3aed")),
-            ("Protective SELL", _format_price(protective_stop) if self.protective_sell_enabled else "OFF", (f"trail {self.protective_sell_trail_pct:.2f}%" if self.protective_sell_enabled else "optional"), QColor("#dc2626")),
-            ("Min SELL stop", _format_price(minimum_sell_stop), f"profit {self.minimum_profit_pct:.2f}%", QColor("#047857")),
-            (("SELL market trigger" if self.sell_trail_pct <= 0 else "Place final SELL"), _format_price(required_last), ("trailing OFF" if self.sell_trail_pct <= 0 else f"trail {self.sell_trail_pct:.2f}%"), QColor("#1d4ed8")),
+            ("Buy reference", _format_price(projected_buy), self._pct_vs(projected_buy, anchor), _theme_color("#7c3aed", "#a78bfa")),
+            ("Protective SELL", _format_price(protective_stop) if self.protective_sell_enabled else "OFF", (f"trail {self.protective_sell_trail_pct:.2f}%" if self.protective_sell_enabled else "optional"), _theme_color("#dc2626", "#f87171")),
+            ("Min SELL stop", _format_price(minimum_sell_stop), f"profit {self.minimum_profit_pct:.2f}%", _theme_color("#047857", "#34d399")),
+            (("SELL market trigger" if self.sell_trail_pct <= 0 else "Place final SELL"), _format_price(required_last), ("trailing OFF" if self.sell_trail_pct <= 0 else f"trail {self.sell_trail_pct:.2f}%"), _theme_color("#1d4ed8", "#60a5fa")),
         ]
         guard_blocks = [
-            ("Hard risk", self._onoff(self.hard_risk_limits_enabled), f"ticker {_format_currency(self.max_daily_loss_ticker, 0)} / total {_format_currency(self.max_daily_loss_total, 0)}", QColor("#b45309")),
-            ("Cycle limits", ("OFF" if self.max_cycles_per_ticker_day <= 0 else f"max {self.max_cycles_per_ticker_day} total"), f"loss streak {self.max_consecutive_losses}", QColor("#b45309")),
-            ("Liquidity", f"spread {self.max_spread_pct:.2f}%", f"min {_format_currency(self.min_trade_price, 2)} / gap {self.max_gap_pct:.2f}%", QColor("#b45309")),
-            ("Live data", self._onoff(self.block_delayed_live), "blocks delayed/frozen live orders", QColor("#b45309")),
+            ("Hard risk", self._onoff(self.hard_risk_limits_enabled), f"ticker {_format_currency(self.max_daily_loss_ticker, 0)} / total {_format_currency(self.max_daily_loss_total, 0)}", _theme_color("#b45309", "#f59e0b")),
+            ("Cycle limits", ("OFF" if self.max_cycles_per_ticker_day <= 0 else f"max {self.max_cycles_per_ticker_day} total"), f"loss streak {self.max_consecutive_losses}", _theme_color("#b45309", "#f59e0b")),
+            ("Liquidity", f"spread {self.max_spread_pct:.2f}%", f"min {_format_currency(self.min_trade_price, 2)} / gap {self.max_gap_pct:.2f}%", _theme_color("#b45309", "#f59e0b")),
+            ("Live data", self._onoff(self.block_delayed_live), "blocks delayed/frozen live orders", _theme_color("#b45309", "#f59e0b")),
         ]
         safety_blocks = [
-            ("What-if", self._onoff(self.what_if_enabled), "IBKR margin pre-check", QColor("#2563eb")),
-            ("Fresh data", self._onoff(self.stale_data_guard_enabled), f"price age <= {self.max_price_age_seconds:.1f}s", QColor("#2563eb")),
-            ("Volatility", self._onoff(self.volatility_filter_enabled), f"recent move <= {self.max_recent_move_pct:.2f}%", QColor("#2563eb")),
-            ("Open/close", self._onoff(self.session_timing_guard_enabled), f"first {self.no_new_buy_first_minutes}m / last {self.no_new_buy_last_minutes}m", QColor("#2563eb")),
+            ("What-if", self._onoff(self.what_if_enabled), "IBKR margin pre-check", _theme_color("#2563eb", "#60a5fa")),
+            ("Fresh data", self._onoff(self.stale_data_guard_enabled), f"price age <= {self.max_price_age_seconds:.1f}s", _theme_color("#2563eb", "#60a5fa")),
+            ("Volatility", self._onoff(self.volatility_filter_enabled), f"recent move <= {self.max_recent_move_pct:.2f}%", _theme_color("#2563eb", "#60a5fa")),
+            ("Open/close", self._onoff(self.session_timing_guard_enabled), f"first {self.no_new_buy_first_minutes}m / last {self.no_new_buy_last_minutes}m", _theme_color("#2563eb", "#60a5fa")),
         ]
 
         for lane_y, blocks in [(entry_y, entry_blocks), (exit_y, exit_blocks), (guard_y, guard_blocks), (safety_y, safety_blocks)]:
@@ -3182,10 +3398,10 @@ class ProfitGuardWidget(QWidget):
                 block_rect = QRectF(x, lane_y, block_w, block_h)
                 self._draw_block(painter, block_rect, title, value, small, color)
                 if previous_right is not None and lane_y != guard_y:
-                    self._draw_arrow(painter, previous_right + 4, lane_y + block_h / 2, x - 4, QColor("#9ca3af"))
+                    self._draw_arrow(painter, previous_right + 4, lane_y + block_h / 2, x - 4, _theme_color("#9ca3af", "#64748b"))
                 previous_right = x + block_w
 
-        painter.setPen(QColor("#5b6270"))
+        painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
         painter.drawText(
             QRectF(rect.left() + 14, rect.bottom() - 24, rect.width() - 28, 18),
             Qt.AlignLeft | Qt.AlignVCenter,
@@ -3330,12 +3546,12 @@ class StrategyGraphWidget(QWidget):
         if nearest is not None:
             text = f"{nearest[2]}\nCursor {_format_currency(price_at_cursor)}"
         painter.save()
-        painter.setPen(QPen(QColor("#64748b"), 1, Qt.DashLine))
+        painter.setPen(QPen(_theme_color("#64748b", "#94a3b8"), 1, Qt.DashLine))
         painter.drawLine(QPointF(hover_x, plot.top()), QPointF(hover_x, plot.bottom()))
         painter.drawLine(QPointF(plot.left(), hover_y), QPointF(plot.right(), hover_y))
         if nearest is not None:
-            painter.setPen(QPen(QColor("#111827"), 1))
-            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.setPen(QPen(_theme_color("#111827", "#f3f4f6"), 1))
+            painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
             painter.drawEllipse(QPointF(nearest[0], nearest[1]), 4, 4)
         font = QFont(painter.font())
         font.setPointSize(8)
@@ -3349,10 +3565,10 @@ class StrategyGraphWidget(QWidget):
         label_x = max(plot.left() + 4, min(label_x, plot.right() - label_width - 4))
         label_y = max(plot.top() + 4, min(label_y, plot.bottom() - label_height - 4))
         label_rect = QRectF(label_x, label_y, label_width, label_height)
-        painter.setBrush(QBrush(QColor("#ffffff")))
-        painter.setPen(QPen(QColor("#94a3b8"), 1))
+        painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
+        painter.setPen(QPen(_theme_color("#94a3b8", "#64748b"), 1))
         painter.drawRoundedRect(label_rect, 6, 6)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         painter.drawText(label_rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignTop, "\n".join(lines))
         painter.restore()
 
@@ -3360,8 +3576,8 @@ class StrategyGraphWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         rect = self.rect().adjusted(8, 8, -8, -8)
-        painter.fillRect(rect, QColor("#ffffff"))
-        painter.setPen(QPen(QColor("#c7cbd1"), 1))
+        painter.fillRect(rect, _theme_color("#ffffff", "#1f2937"))
+        painter.setPen(QPen(_theme_color("#c7cbd1", "#475569"), 1))
         painter.drawRoundedRect(QRectF(rect), 8, 8)
 
         cycle = self._cycle or {}
@@ -3372,14 +3588,14 @@ class StrategyGraphWidget(QWidget):
         stage = cycle.get("stage") or "Idle / price only"
         source = (self._price_snapshot or {}).get("source") or "-"
 
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         title_font = QFont(painter.font())
         title_font.setBold(True)
         title_font.setPointSize(max(9, title_font.pointSize()))
         painter.setFont(title_font)
         painter.drawText(rect.adjusted(12, 8, -12, -8), Qt.AlignLeft | Qt.AlignTop, title)
         painter.setFont(QFont())
-        painter.setPen(QColor("#5b6270"))
+        painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
         painter.drawText(rect.adjusted(12, 33, -12, -8), Qt.AlignLeft | Qt.AlignTop, f"Stage: {stage} | Price source: {source} | Price line: last usable app price")
 
         legend_width = 285
@@ -3391,7 +3607,7 @@ class StrategyGraphWidget(QWidget):
         else:
             self._last_plot_time_range = None
         if plot.width() <= 30 or plot.height() <= 30:
-            painter.setPen(QColor("#5b6270"))
+            painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
             painter.drawText(QRectF(rect), Qt.AlignCenter, "Window too small for graph.")
             return
 
@@ -3399,7 +3615,7 @@ class StrategyGraphWidget(QWidget):
         values = [p for _t, p in self._history]
         values.extend(v for _name, v, _color, _tag in levels)
         if not values:
-            painter.setPen(QColor("#5b6270"))
+            painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
             painter.drawText(QRectF(rect), Qt.AlignCenter, "No price data yet. Confirm a ticker or start a cycle.")
             return
         min_v = min(values)
@@ -3414,15 +3630,15 @@ class StrategyGraphWidget(QWidget):
         def map_y(value: float) -> float:
             return plot.bottom() - ((value - min_v) / max(1e-9, (max_v - min_v))) * plot.height()
 
-        painter.setPen(QPen(QColor("#d7dae0"), 1))
+        painter.setPen(QPen(_theme_color("#d7dae0", "#374151"), 1))
         for i in range(6):
             y = plot.top() + plot.height() * i / 5
             value = max_v - (max_v - min_v) * i / 5
             painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
-            painter.setPen(QColor("#5b6270"))
+            painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
             painter.drawText(QRectF(rect.left() + 4, y - 9, 66, 18), Qt.AlignRight | Qt.AlignVCenter, _format_currency(value, decimals=2))
-            painter.setPen(QPen(QColor("#d7dae0"), 1))
-        painter.setPen(QPen(QColor("#9ca3af"), 1))
+            painter.setPen(QPen(_theme_color("#d7dae0", "#374151"), 1))
+        painter.setPen(QPen(_theme_color("#9ca3af", "#64748b"), 1))
         painter.drawRect(plot)
 
         if self._history:
@@ -3437,11 +3653,11 @@ class StrategyGraphWidget(QWidget):
                 for t, price in self._history:
                     x = plot.left() + ((t - first_t) / span) * plot.width()
                     points.append(QPointF(x, map_y(price)))
-            painter.setPen(QPen(QColor("#111827"), 2))
+            painter.setPen(QPen(_theme_color("#111827", "#f3f4f6"), 2))
             for a, b in zip(points, points[1:]):
                 painter.drawLine(a, b)
             current = points[-1]
-            painter.setBrush(QColor("#111827"))
+            painter.setBrush(_theme_color("#111827", "#334155"))
             painter.setPen(QPen(QColor("#ffffff"), 1))
             painter.drawEllipse(current, 4, 4)
             latest_price = self._history[-1][1]
@@ -3449,7 +3665,7 @@ class StrategyGraphWidget(QWidget):
                 painter,
                 QRectF(min(current.x() + 8, plot.right() - 122), max(plot.top() + 4, current.y() - 13), 118, 24),
                 f"Current {_format_currency(latest_price)}",
-                QColor("#111827"),
+                _theme_color("#111827", "#334155"),
                 QColor("#ffffff"),
             )
 
@@ -3461,9 +3677,9 @@ class StrategyGraphWidget(QWidget):
                     span = max(1.0, last_t - first_t)
                     hx = plot.left() + ((hover_t - first_t) / span) * plot.width()
                     hy = map_y(hover_price)
-                    painter.setPen(QPen(QColor("#2563eb"), 1, Qt.DotLine))
+                    painter.setPen(QPen(_theme_color("#2563eb", "#60a5fa"), 1, Qt.DotLine))
                     painter.drawLine(QPointF(hx, plot.top()), QPointF(hx, plot.bottom()))
-                    painter.setBrush(QColor("#2563eb"))
+                    painter.setBrush(_theme_color("#2563eb", "#60a5fa"))
                     painter.setPen(QPen(QColor("#ffffff"), 1))
                     painter.drawEllipse(QPointF(hx, hy), 5, 5)
                     hover_time = _format_utc_timestamp(hover_t, compact=True)
@@ -3474,7 +3690,7 @@ class StrategyGraphWidget(QWidget):
                         174,
                         26,
                     )
-                    _draw_text_box(painter, label_rect, label, QColor("#2563eb"), QColor("#ffffff"))
+                    _draw_text_box(painter, label_rect, label, _theme_color("#2563eb", "#60a5fa"), QColor("#ffffff"))
 
         for _name, value, color, _tag in levels:
             y = map_y(value)
@@ -3489,10 +3705,10 @@ class StrategyGraphWidget(QWidget):
             hover_x = plot.left() + ((float(hover_t) - first_t) / span) * plot.width()
             hover_y = map_y(float(hover_price))
             if plot.left() <= hover_x <= plot.right() and plot.top() <= hover_y <= plot.bottom():
-                painter.setPen(QPen(QColor("#2563eb"), 1, Qt.DashLine))
+                painter.setPen(QPen(_theme_color("#2563eb", "#60a5fa"), 1, Qt.DashLine))
                 painter.drawLine(QPointF(hover_x, plot.top()), QPointF(hover_x, plot.bottom()))
                 painter.drawLine(QPointF(plot.left(), hover_y), QPointF(plot.right(), hover_y))
-                painter.setBrush(QColor("#2563eb"))
+                painter.setBrush(_theme_color("#2563eb", "#60a5fa"))
                 painter.setPen(QPen(QColor("#ffffff"), 1))
                 painter.drawEllipse(QPointF(hover_x, hover_y), 4, 4)
                 time_text = _format_utc_timestamp(hover_t, compact=True)
@@ -3504,36 +3720,36 @@ class StrategyGraphWidget(QWidget):
                     painter,
                     QRectF(box_x, box_y, box_w, box_h),
                     f"{time_text}  {_format_currency(float(hover_price), decimals=4)}",
-                    QColor("#1d4ed8"),
-                    QColor("#eff6ff"),
+                    _theme_color("#1d4ed8", "#60a5fa"),
+                    _theme_color("#eff6ff", "#172554"),
                 )
 
-        painter.setPen(QPen(QColor("#c7cbd1"), 1))
-        painter.setBrush(QColor("#f9fafb"))
+        painter.setPen(QPen(_theme_color("#c7cbd1", "#475569"), 1))
+        painter.setBrush(_theme_color("#f9fafb", "#0f172a"))
         painter.drawRoundedRect(legend, 6, 6)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         painter.drawText(QRectF(legend.left() + 10, legend.top() + 8, legend.width() - 20, 18), Qt.AlignLeft | Qt.AlignVCenter, "Level list")
 
         row_y = legend.top() + 34
         row_h = 24
         if not levels:
-            painter.setPen(QColor("#6b7280"))
+            painter.setPen(_theme_color("#6b7280", "#9ca3af"))
             empty_text = "Only the current price is shown until a strategy cycle is running." if stage in {"", Stage.STOPPED.value, Stage.IDLE.value} else "No level data for this state."
             painter.drawText(QRectF(legend.left() + 12, row_y, legend.width() - 24, 44), Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, empty_text)
         for name, value, color, tag in sorted(levels, key=lambda item: item[1], reverse=True)[:10]:
             painter.setPen(QPen(color, 3))
             painter.drawLine(QPointF(legend.left() + 10, row_y + 10), QPointF(legend.left() + 28, row_y + 10))
-            painter.setPen(QColor("#111827"))
+            painter.setPen(_theme_color("#111827", "#f3f4f6"))
             painter.drawText(QRectF(legend.left() + 36, row_y, legend.width() - 116, 18), Qt.AlignLeft | Qt.AlignVCenter, name)
-            painter.setPen(QColor("#5b6270"))
+            painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
             painter.drawText(QRectF(legend.right() - 92, row_y, 82, 18), Qt.AlignRight | Qt.AlignVCenter, _format_currency(value))
-            painter.setPen(QColor("#6b7280"))
+            painter.setPen(_theme_color("#6b7280", "#9ca3af"))
             painter.drawText(QRectF(legend.left() + 36, row_y + 13, legend.width() - 46, 12), Qt.AlignLeft | Qt.AlignVCenter, tag)
             row_y += row_h
             if row_y > legend.bottom() - 28:
                 break
 
-        painter.setPen(QColor("#5b6270"))
+        painter.setPen(_theme_color("#5b6270", "#aeb8c8"))
         note = "Native trailing-stop orders are managed by TWS; market-order mode is used when a trailing field is 0. Active trail lines are estimates from prices observed by this app."
         if self._history:
             hours = self._history_max_age_seconds / 3600.0
@@ -3737,12 +3953,12 @@ class StrategyFlowchartWidget(QWidget):
         if nearest is not None:
             text = f"{nearest[2]}\nCursor {_format_currency(price_at_cursor)}"
         painter.save()
-        painter.setPen(QPen(QColor("#64748b"), 1, Qt.DashLine))
+        painter.setPen(QPen(_theme_color("#64748b", "#94a3b8"), 1, Qt.DashLine))
         painter.drawLine(QPointF(hover_x, plot.top()), QPointF(hover_x, plot.bottom()))
         painter.drawLine(QPointF(plot.left(), hover_y), QPointF(plot.right(), hover_y))
         if nearest is not None:
-            painter.setPen(QPen(QColor("#111827"), 1))
-            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.setPen(QPen(_theme_color("#111827", "#f3f4f6"), 1))
+            painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
             painter.drawEllipse(QPointF(nearest[0], nearest[1]), 4, 4)
         font = QFont(painter.font())
         font.setPointSize(8)
@@ -3756,10 +3972,10 @@ class StrategyFlowchartWidget(QWidget):
         label_x = max(plot.left() + 4, min(label_x, plot.right() - label_width - 4))
         label_y = max(plot.top() + 4, min(label_y, plot.bottom() - label_height - 4))
         label_rect = QRectF(label_x, label_y, label_width, label_height)
-        painter.setBrush(QBrush(QColor("#ffffff")))
-        painter.setPen(QPen(QColor("#94a3b8"), 1))
+        painter.setBrush(QBrush(_theme_color("#ffffff", "#1f2937")))
+        painter.setPen(QPen(_theme_color("#94a3b8", "#64748b"), 1))
         painter.drawRoundedRect(label_rect, 6, 6)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(_theme_color("#111827", "#f3f4f6"))
         painter.drawText(label_rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignTop, "\n".join(lines))
         painter.restore()
 
@@ -3768,7 +3984,7 @@ class StrategyFlowchartWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing, True)
         canvas_w = max(float(self.MIN_CANVAS_WIDTH), float(self.width()))
         canvas_h = max(float(self._canvas_height()), float(self.height()))
-        painter.fillRect(QRectF(0, 0, canvas_w, canvas_h), QColor("#f6f7f9"))
+        painter.fillRect(QRectF(0, 0, canvas_w, canvas_h), _theme_color("#f6f7f9", "#111827"))
 
         cycle = self._cycle or {}
         ticker = cycle.get("ticker") or self._strategy.normalized_ticker() or "-"
@@ -3776,13 +3992,13 @@ class StrategyFlowchartWidget(QWidget):
         price = (self._price_snapshot or {}).get("price")
         margin_x = 16.0
         header = QRectF(margin_x, 18, canvas_w - 2 * margin_x, 102)
-        self._draw_round_box(painter, header, QColor("#ffffff"), QColor("#c7cbd1"), 1)
-        self._draw_text(painter, QRectF(header.left() + 22, header.top() + 14, header.width() - 44, 30), "Strategy flowchart - code-aligned current parameters", QColor("#111827"), 16, True)
+        self._draw_round_box(painter, header, _theme_color("#ffffff", "#1f2937"), _theme_color("#c7cbd1", "#475569"), 1)
+        self._draw_text(painter, QRectF(header.left() + 22, header.top() + 14, header.width() - 44, 30), "Strategy flowchart - code-aligned current parameters", _theme_color("#111827", "#f3f4f6"), 16, True)
         self._draw_text(
             painter,
             QRectF(header.left() + 22, header.top() + 52, header.width() - 44, 44),
             f"Ticker: {ticker} | Current stage: {stage} | Selected API price: {_format_field_value('price', price)} | RTH-only: {'on' if self._strategy.rth_only else 'off'} | Protective SELL: {'on' if self._strategy.protective_sell_enabled else 'off'} | Slippage buffer: {'on' if self._strategy.slippage_buffer_enabled else 'off'} | Hard risk limits: {'on' if self._strategy.hard_risk_limits_enabled else 'off'}",
-            QColor("#4b5563"),
+            _theme_color("#4b5563", "#cbd5e1"),
             9,
             False,
         )
@@ -3793,36 +4009,36 @@ class StrategyFlowchartWidget(QWidget):
         card_h = self.CARD_HEIGHT
         gap = self.CARD_GAP
         stage_colors = {
-            Stage.WAIT_INITIAL_DROP: (QColor("#fff7ed"), QColor("#c2410c")),
-            Stage.BUY_TRAIL_ACTIVE: (QColor("#f5f3ff"), QColor("#7c3aed")),
-            Stage.WAIT_RISE_TRIGGER: (QColor("#eff6ff"), QColor("#1d4ed8")),
-            Stage.SELL_TRAIL_ACTIVE: (QColor("#ecfdf5"), QColor("#047857")),
-            Stage.CYCLE_COMPLETE: (QColor("#f8fafc"), QColor("#334155")),
+            Stage.WAIT_INITIAL_DROP: (_theme_color("#fff7ed", "#431407"), _theme_color("#c2410c", "#fb923c")),
+            Stage.BUY_TRAIL_ACTIVE: (_theme_color("#f5f3ff", "#2e1065"), _theme_color("#7c3aed", "#a78bfa")),
+            Stage.WAIT_RISE_TRIGGER: (_theme_color("#eff6ff", "#172554"), _theme_color("#1d4ed8", "#60a5fa")),
+            Stage.SELL_TRAIL_ACTIVE: (_theme_color("#ecfdf5", "#123524"), _theme_color("#047857", "#34d399")),
+            Stage.CYCLE_COMPLETE: (_theme_color("#f8fafc", "#172033"), _theme_color("#334155", "#cbd5e1")),
         }
         cards = self._filtered_cards()
         if not cards:
             cards = list(self._cards)
         for idx, card in enumerate(cards):
             top = y + idx * (card_h + gap)
-            fill, accent = stage_colors.get(card.stage, (QColor("#ffffff"), QColor("#374151")))
+            fill, accent = stage_colors.get(card.stage, (_theme_color("#ffffff", "#1f2937"), _theme_color("#374151", "#d1d5db")))
             stage_status = self._status_for_card(card)
             if stage_status == "Done":
-                fill, accent = QColor("#ecfdf5"), QColor("#16a34a")
+                fill, accent = _theme_color("#ecfdf5", "#123524"), _theme_color("#16a34a", "#4ade80")
             elif stage_status == "Blocked":
-                fill, accent = QColor("#fef2f2"), QColor("#dc2626")
+                fill, accent = _theme_color("#fef2f2", "#450a0a"), _theme_color("#dc2626", "#f87171")
             elif stage_status == "Pending":
-                fill, accent = QColor("#f3f4f6"), QColor("#6b7280")
+                fill, accent = _theme_color("#f3f4f6", "#273449"), _theme_color("#6b7280", "#9ca3af")
             else:
-                fill, accent = QColor("#eff6ff"), QColor("#2563eb")
-            border = accent if card.active or stage_status in {"Current", "Blocked"} else QColor("#c7cbd1")
+                fill, accent = _theme_color("#eff6ff", "#172554"), _theme_color("#2563eb", "#60a5fa")
+            border = accent if card.active or stage_status in {"Current", "Blocked"} else _theme_color("#c7cbd1", "#475569")
             border_width = 4 if card.active or stage_status == "Current" else 1
             rect = QRectF(x, top, card_w, card_h)
-            self._draw_round_box(painter, rect, QColor("#ffffff"), border, border_width)
+            self._draw_round_box(painter, rect, _theme_color("#ffffff", "#1f2937"), border, border_width)
             painter.fillRect(QRectF(rect.left(), rect.top(), 14, rect.height()), accent)
             painter.fillRect(QRectF(rect.left() + 14, rect.top(), rect.width() - 14, 38), fill)
 
             title = card.title + (f"  -  {stage_status.upper()}" if stage_status != "Pending" else "")
-            self._draw_text(painter, QRectF(rect.left() + 30, rect.top() + 8, rect.width() - 150, 30), title, QColor("#111827"), 12, True)
+            self._draw_text(painter, QRectF(rect.left() + 30, rect.top() + 8, rect.width() - 150, 30), title, _theme_color("#111827", "#f3f4f6"), 12, True)
             badge = QRectF(rect.right() - 96, rect.top() + 8, 64, 24)
             self._draw_round_box(painter, badge, fill, accent, 1, 8)
             stage_number = _stage_index(card.stage.value) or (idx + 1)
@@ -3845,16 +4061,16 @@ class StrategyFlowchartWidget(QWidget):
             trigger_box = QRectF(order_box.right() + box_gap, inner_top, trigger_w, box_h)
             details_box = QRectF(trigger_box.right() + box_gap, inner_top, max(180.0, details_w), box_h)
             for box_rect in (order_box, trigger_box, details_box):
-                self._draw_round_box(painter, box_rect, QColor("#f9fafb"), QColor("#d1d5db"), 1, 8)
+                self._draw_round_box(painter, box_rect, _theme_color("#f9fafb", "#0f172a"), _theme_color("#d1d5db", "#475569"), 1, 8)
 
             self._draw_text(painter, order_box.adjusted(10, 8, -10, -8), f"Stage status: {stage_status}\n\nBroker order type used\n{card.order_summary}", accent, 9, True)
-            self._draw_text(painter, trigger_box.adjusted(10, 8, -10, -8), "Calculated trigger values\n" + card.trigger_summary, QColor("#111827"), 9, True)
+            self._draw_text(painter, trigger_box.adjusted(10, 8, -10, -8), "Calculated trigger values\n" + card.trigger_summary, _theme_color("#111827", "#f3f4f6"), 9, True)
             detail_lines = ["Input values used and live guard status:"] + [f"- {line}" for line in card.details]
             detail_text = "\n".join(detail_lines)
-            self._draw_text(painter, details_box.adjusted(10, 8, -10, -8), detail_text, QColor("#374151"), 9, False)
+            self._draw_text(painter, details_box.adjusted(10, 8, -10, -8), detail_text, _theme_color("#374151", "#d1d5db"), 9, False)
 
             if idx < len(cards) - 1:
-                self._draw_arrow(painter, rect.center().x(), rect.bottom() + 4, rect.bottom() + gap - 4, QColor("#9ca3af"))
+                self._draw_arrow(painter, rect.center().x(), rect.bottom() + 4, rect.bottom() + gap - 4, _theme_color("#9ca3af", "#64748b"))
 
 
 class FlowchartPanel(QWidget):
@@ -4540,24 +4756,42 @@ class AboutInfoDialog(QDialog):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
+        self.logo_panel = QFrame()
+        self.logo_panel.setObjectName("AboutLogoPanel")
+        self.logo_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        logo_layout = QHBoxLayout(self.logo_panel)
+        logo_layout.setContentsMargins(7, 7, 7, 7)
+        logo_layout.setSpacing(0)
+
         self.logo_label = QLabel()
         self.logo_label.setAlignment(Qt.AlignCenter)
         self.logo_label.setObjectName("AboutLogo")
+        self.logo_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         logo_path = resource_path("Images", "BouncyBot_logo.png")
         if logo_path.is_file():
             pixmap = QPixmap(str(logo_path))
             if not pixmap.isNull():
-                self.logo_label.setPixmap(
-                    pixmap.scaled(620, 360, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
-        layout.addWidget(self.logo_label)
+                # Keep the complete logo in a bounded row. The previous aligned
+                # QLabel could draw beyond the layout cell on high-DPI Windows
+                # screens, which allowed the title widgets to overlap the image.
+                scaled_logo = pixmap.scaled(520, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.logo_label.setPixmap(scaled_logo)
+                self.logo_label.setFixedSize(scaled_logo.size())
+                logo_height = max(180, int(scaled_logo.height()) + 14)
+                self.logo_panel.setMinimumHeight(logo_height)
+                self.logo_panel.setMaximumHeight(logo_height)
+        logo_layout.addWidget(self.logo_label, 0, Qt.AlignCenter)
+        # Add the fixed-height panel without an outer alignment flag so the
+        # QVBoxLayout reserves the complete row before positioning title text.
+        layout.addWidget(self.logo_panel)
 
         self.title_label = QLabel("BouncyBot - IBKR Portable Trading Bot")
         self.title_label.setObjectName("AboutTitle")
         self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
 
-        self.version_label = QLabel("Version 3.2.2")
+        self.version_label = QLabel(f"Version {APP_VERSION}")
         self.version_label.setObjectName("Muted")
         self.version_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.version_label)
@@ -5405,23 +5639,47 @@ class CycleAuditDialog(QDialog):
         layout.addWidget(info)
         split = QHBoxLayout()
         split.setSpacing(12)
-        transition_table = cls._records_table(transition_rows, [
-            ("created_at", "Time"),
-            ("stage_before", "Before"),
-            ("stage_after", "After"),
-            ("event_type", "Event"),
-            ("decision_result", "Result"),
-            ("message", "Message"),
-        ], "No stage transitions were recorded for this cycle.", max_visible_rows=4, expand_when_overflow=False)
-        risk_table = cls._records_table(risk_rows, [
-            ("created_at", "Time"),
-            ("event_type", "Guard / risk event"),
-            ("decision_result", "Result"),
-            ("message", "Message"),
-        ], "No guard/risk blocks were recorded for this cycle.", max_visible_rows=4, expand_when_overflow=False)
-        _fit_table_width_to_columns(risk_table, minimum=300, maximum=480)
-        split.addWidget(transition_table, 1, Qt.AlignTop)
-        split.addWidget(risk_table, 0, Qt.AlignTop)
+        transition_table = cls._records_table(
+            transition_rows,
+            [
+                ("created_at", "Time"),
+                ("stage_before", "Before"),
+                ("stage_after", "After"),
+                ("event_type", "Event"),
+                ("decision_result", "Result"),
+                ("message", "Message"),
+            ],
+            "No stage transitions were recorded for this cycle.",
+            max_visible_rows=4,
+            expand_when_overflow=False,
+            column_minimums=(90, 70, 70, 80, 70, 120),
+            column_maximums=(110, 90, 90, 110, 90, 165),
+            expanding=True,
+        )
+        risk_table = cls._records_table(
+            risk_rows,
+            [
+                ("created_at", "Time"),
+                ("event_type", "Guard / risk event"),
+                ("decision_result", "Result"),
+                ("message", "Message"),
+            ],
+            "No guard/risk blocks were recorded for this cycle.",
+            max_visible_rows=4,
+            expand_when_overflow=False,
+            column_minimums=(90, 95, 70, 120),
+            column_maximums=(110, 125, 90, 180),
+            expanding=True,
+        )
+        # Preserve compact widths for timestamp/state columns, then let each
+        # message column absorb the remaining viewport width. Both tables now
+        # fill the Timeline tab instead of collecting at the left edge, while
+        # horizontal scrollbars remain available only for genuinely narrow
+        # windows or unusually long non-wrapping content.
+        transition_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        risk_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        split.addWidget(transition_table, 3)
+        split.addWidget(risk_table, 2)
         layout.addLayout(split, 0)
         return tab
 
@@ -5560,10 +5818,18 @@ class CycleAuditDialog(QDialog):
             ("Last captured row", last_capture or "No completed capture file found"),
         ]
         summary_table = cls._key_value_table(items)
-        # This metadata table is short and important; show every field without
-        # a vertical scrollbar so the operator can scan the capture context at
-        # once. The preview/file widgets below absorb remaining vertical space.
-        _fit_table_height_to_all_rows(summary_table, min_height=420, max_height=760)
+        # Keep the tab itself free of an outer vertical scrollbar. The metadata
+        # table gets a bounded viewport and its own scrollbar, leaving room for
+        # the captured-row preview and source-file list in the same main window.
+        _fit_table_height_to_rows(
+            summary_table,
+            min_rows=7,
+            max_visible_rows=8,
+            min_height=220,
+            max_fit_height=300,
+            expand_when_overflow=False,
+        )
+        summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         layout.addWidget(summary_table, 0)
         if capture_rows:
             preview_rows: list[dict[str, Any]] = []
@@ -5586,20 +5852,22 @@ class CycleAuditDialog(QDialog):
                 ("price", "Selected price"),
                 ("source", "Source"),
                 ("capture_file", "Capture ZIP"),
-            ], "No captured rows found for this cycle.")
-            preview_table.setMinimumHeight(240)
+            ], "No captured rows found for this cycle.", max_visible_rows=8)
+            preview_table.setMinimumHeight(180)
+            preview_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
             preview_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             layout.addWidget(preview_table, 2)
         if capture_files:
             file_box = QTextEdit()
             file_box.setReadOnly(True)
-            file_box.setMinimumHeight(110)
+            file_box.setMinimumHeight(80)
+            file_box.setMaximumHeight(140)
             file_box.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
             file_box.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            file_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            file_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             file_box.setPlainText("\n".join(str(path) for path in capture_files))
-            layout.addWidget(file_box, 1)
-        return cls._scrollable_tab(tab)
+            layout.addWidget(file_box, 0)
+        return tab
 
     @staticmethod
     def _records_table(
@@ -5609,6 +5877,12 @@ class CycleAuditDialog(QDialog):
         *,
         max_visible_rows: int = 12,
         expand_when_overflow: bool = True,
+        column_minimum: int = 64,
+        column_maximum: int = 320,
+        last_column_maximum: int = 420,
+        column_minimums: Optional[tuple[int, ...]] = None,
+        column_maximums: Optional[tuple[int, ...]] = None,
+        expanding: bool = True,
     ) -> QTableWidget:
         if not records:
             records = [{columns[0][0]: empty_message}]
@@ -5619,14 +5893,22 @@ class CycleAuditDialog(QDialog):
             stretch_last=False,
             horizontal_scroll=Qt.ScrollBarAsNeeded,
             vertical_scroll=Qt.ScrollBarAlwaysOn,
-            expanding=True,
+            expanding=expanding,
         )
         for row_idx, record in enumerate(records):
             for col_idx, (key, _label) in enumerate(columns):
-                item = QTableWidgetItem(_format_field_value(key, record.get(key)))
-                item.setToolTip(str(record.get("raw_json") or ""))
+                display_value = _format_field_value(key, record.get(key))
+                item = QTableWidgetItem(display_value)
+                item.setToolTip(str(record.get("raw_json") or display_value))
                 table.setItem(row_idx, col_idx, item)
-        _auto_size_table_columns(table, minimum=64, maximum=320, last_maximum=420)
+        _auto_size_table_columns(
+            table,
+            minimum=column_minimum,
+            maximum=column_maximum,
+            last_maximum=last_column_maximum,
+            column_minimums=column_minimums,
+            column_maximums=column_maximums,
+        )
         _fit_table_height_to_rows(
             table,
             min_rows=min(4, len(records)),
@@ -5649,7 +5931,7 @@ class CycleAuditDialog(QDialog):
             lines.extend([
                 "BUILT-IN EXAMPLE CYCLE",
                 "=" * 80,
-                "This is synthetic v3.2.2 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
+                "This is synthetic v3.3.0 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
                 "The scenario models a liquid U.S. stock pullback, a multi-execution trailing BUY fill, a temporary protective SELL, and a modest trailing-stop profit exit.",
                 "",
             ])
@@ -5761,7 +6043,8 @@ class MainWindow(QMainWindow):
         )
         self._system_shutdown_in_progress = False
         self._last_system_shutdown_session_key = ""
-        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.2.2")
+        self._dark_mode = _dark_mode_enabled()
+        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.3.0")
         icon_path = resource_path("Images", "BouncyBot_app_icon.png")
         if icon_path.is_file():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -5934,10 +6217,43 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        view_menu = self.menuBar().addMenu("View")
+        self.light_mode_action = QAction("Light mode", self)
+        self.light_mode_action.setCheckable(True)
+        self.dark_mode_action = QAction("Dark mode", self)
+        self.dark_mode_action.setCheckable(True)
+        self.light_mode_action.triggered.connect(
+            lambda _checked=False: self._set_theme_from_view_menu(False)
+        )
+        self.dark_mode_action.triggered.connect(
+            lambda _checked=False: self._set_theme_from_view_menu(True)
+        )
+        view_menu.addAction(self.light_mode_action)
+        view_menu.addAction(self.dark_mode_action)
+        self._sync_theme_menu_actions()
+
         about_menu = self.menuBar().addMenu("About")
         self.about_info_action = QAction("Info", self)
         self.about_info_action.triggered.connect(self._show_about_info)
         about_menu.addAction(self.about_info_action)
+
+    def _sync_theme_menu_actions(self) -> None:
+        """Keep the mutually exclusive View menu choices in sync."""
+        # ``__dict__`` avoids fabricating dynamic attributes in lightweight Qt
+        # test doubles while remaining equivalent to normal QWidget lookup.
+        light_action = self.__dict__.get("light_mode_action")
+        dark_action = self.__dict__.get("dark_mode_action")
+        if light_action is not None:
+            light_action.setChecked(not bool(self._dark_mode))
+        if dark_action is not None:
+            dark_action.setChecked(bool(self._dark_mode))
+
+    def _set_theme_from_view_menu(self, dark: bool) -> None:
+        """Apply an immediate operator-selected light or dark appearance."""
+        app = QApplication.instance()
+        if app is not None:
+            _apply_fusion_application_palette(app, bool(dark))
+        self.apply_system_theme(bool(dark))
 
     def _show_about_info(self) -> None:
         AboutInfoDialog(self).exec()
@@ -9148,11 +9464,11 @@ class MainWindow(QMainWindow):
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                     if row_values[0] == "Inconsistency":
                         if action_state == "risk":
-                            item.setBackground(QColor("#fee2e2"))
+                            item.setBackground(_theme_color("#fee2e2", "#450a0a"))
                         elif action_state == "waiting":
-                            item.setBackground(QColor("#fffbeb"))
+                            item.setBackground(_theme_color("#fffbeb", "#422006"))
                         elif action_state in {"success", "active"}:
-                            item.setBackground(QColor("#ecfdf5"))
+                            item.setBackground(_theme_color("#ecfdf5", "#123524"))
                     self.recovery_compare_table.setItem(row_idx, col_idx, item)
             _auto_size_table_columns(self.recovery_compare_table, minimum=72, maximum=460, last_maximum=620)
             _fit_table_height_to_rows(self.recovery_compare_table, min_rows=5, max_visible_rows=7, min_height=220, max_fit_height=360)
@@ -10543,10 +10859,45 @@ class MainWindow(QMainWindow):
         self.controller.shutdown()
         event.accept()
 
+    def apply_system_theme(self, dark: bool) -> None:
+        """Apply a system theme change to existing and future GUI widgets."""
+        app = QApplication.instance()
+        if app is not None:
+            app.setProperty(DARK_MODE_APP_PROPERTY, bool(dark))
+        self._dark_mode = bool(dark)
+        self._sync_theme_menu_actions()
+        self._apply_styles()
+
+        widgets: list[QWidget] = []
+        try:
+            all_widgets = getattr(app, "allWidgets", None) if app is not None else None
+            if callable(all_widgets):
+                widgets = list(all_widgets())
+        except Exception:
+            widgets = []
+        if not widgets:
+            widgets = [self]
+            try:
+                widgets.extend(self.findChildren(QWidget))
+            except Exception:
+                pass
+
+        for widget in widgets:
+            refresh_theme = getattr(widget, "refresh_theme", None)
+            if callable(refresh_theme):
+                refresh_theme()
+            if isinstance(
+                widget,
+                (CycleTimelineWidget, ProfitGuardWidget, StrategyGraphWidget, StrategyFlowchartWidget),
+            ):
+                widget.update()
+        self.update()
+
     def _apply_styles(self) -> None:
-        # Explicit light palette. Without these generic widget rules, Windows
-        # dark mode can make Qt labels/inputs inherit white text on white cards.
-        self.setStyleSheet(
+        # The light rules are the canonical stylesheet. A deterministic color
+        # conversion produces the matching dark rules while preserving spacing,
+        # sizing, selectors, and semantic state borders.
+        light_stylesheet = (
             """
             QWidget {
                 color: #111827;
@@ -10914,11 +11265,15 @@ class MainWindow(QMainWindow):
                 padding: 7px 9px;
                 font-weight: 600;
             }
-            QLabel#AboutLogo {
+            QFrame#AboutLogoPanel {
                 background-color: #000000;
                 border: 1px solid #c7cbd1;
                 border-radius: 8px;
-                padding: 6px;
+            }
+            QLabel#AboutLogo {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
             QLabel#AboutTitle {
                 color: #111827;
@@ -11105,3 +11460,10 @@ class MainWindow(QMainWindow):
             }
             """
         )
+        stylesheet = _dark_stylesheet(light_stylesheet) if _dark_mode_enabled() else light_stylesheet
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(stylesheet)
+        # Keep a local stylesheet as well so headless GUI doubles and embedded
+        # windows receive the same rules as production top-level dialogs.
+        self.setStyleSheet(stylesheet)

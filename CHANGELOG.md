@@ -2,6 +2,34 @@
 
 This file summarizes behavior-changing and maintenance releases represented by the repository. Historical implementation notes remain in `docs/legacy/` for traceability. Current behavior is documented in `README.md` and the current guides linked from `docs/README.md`.
 
+## v3.3.0
+
+### Added
+
+- Added automatic operating-system light/dark appearance. BouncyBot detects Qt's current system color scheme before applying its Fusion palette and follows supported live `QStyleHints.colorSchemeChanged` notifications without adding a persisted user setting.
+- Added **View > Light mode** and **View > Dark mode** between the File and About menus for immediate in-process appearance switching. The checked menu item follows both manual changes and later system-theme notifications.
+- Added dark-aware rendering for ordinary Qt controls and for the custom-painted Cycle Timeline, Profit Guard, strategy graph, and strategy flowchart surfaces, labels, grids, semantic states, and hover cards. The dark palette now uses neutral Qt Fusion-style greys instead of the initial navy/slate treatment.
+- Added a release-root `BouncyBot.lnk` shortcut to `GUI\IBKRTradingBot.exe`; it stores the GUI path as a relative fallback so the complete extracted release folder remains portable. `QUICK_START.txt` documents both launch paths and the shortcut is included in the release checksum manifest.
+
+### Changed
+
+- Corrected the About dialog logo row by placing the bounded image in a dedicated fixed-height panel. The title/version/link rows are now laid out after that panel and cannot overlap the artwork on high-DPI Windows displays.
+- Kept bounded content widths for compact Cycle Audit Timeline fields while making both tables fill the available horizontal row. Their message columns stretch into remaining space, with a 3:2 transition-to-risk table allocation and conditional scrolling only when content genuinely exceeds the viewport.
+- Removed the outer vertical scrollbar from the Cycle Audit Market capture tab. Its metadata table, captured-row preview, and capture-file list now use bounded internal viewports and their own vertical scrollbars so all sections fit the main audit window.
+- Stopped copying the complete source `Images/` directory into the Windows release root. PyInstaller still bundles the runtime application icon and About logo inside the `GUI/` one-directory bundle; source-only screenshots and README artwork remain in the repository/source release.
+- Increased application, package, Windows release, documentation, and current regression metadata from v3.2.2 to v3.3.0.
+
+### Safety and compatibility
+
+- No strategy, order construction/submission, price selection, quantity, risk, session, reconnect, reconciliation, recovery, fill, commission, P/L, or persistence behavior changed.
+- No SQLite table, column, index, migration, or persisted theme setting was added. Existing v3.2.2 databases, settings, active cycles, orders, executions, audits, backups, exports, and market captures remain compatible.
+- System theme detection affects presentation only. Failure to obtain or monitor a system color scheme falls back to the light appearance and cannot affect trading state.
+
+### Documentation and tests
+
+- Added focused coverage for light/dark palette roles, system-theme signal handling, View-menu theme switching, neutral Fusion-dark stylesheet conversion, theme refresh of cached state widgets and custom-painted views, non-overlapping About-logo layout, full-width Timeline table allocation, Market capture internal scrolling, runtime-only image packaging, shortcut creation/checksums, current release metadata, and archived v3.2.2 documentation.
+- Added [`docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md`](docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) and archived the v3.2.2 release note under `docs/legacy/`.
+
 ## v3.2.2
 
 ### Changed
@@ -25,7 +53,7 @@ This file summarizes behavior-changing and maintenance releases represented by t
 ### Documentation and tests
 
 - Added focused tests for contract-description propagation, price-monitor identity formatting and styling, content-sized Timeline columns, asymmetric Timeline table allocation, top-aligned audit record tabs, branding assets, application icon loading, About information, build resource inclusion, and legacy-document placement.
-- Added [`docs/V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md`](docs/V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) and archived the v3.2.1 release note under `docs/legacy/`.
+- Added [`docs/V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md`](docs/legacy/V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) and archived the v3.2.1 release note under `docs/legacy/`.
 
 ## v3.2.1
 

@@ -1,6 +1,6 @@
 # Deterministic offline behavior tests
 
-This document describes the current non-GUI, non-Windows, non-network test layer in v3.2.2. It covers strategy behavior, controller state transitions, broker-event handling, persistence and recovery, shutdown checkpoints, GUI contracts, and bounded performance behavior.
+This document describes the current non-GUI, non-Windows, non-network test layer in v3.3.0. It covers strategy behavior, controller state transitions, broker-event handling, persistence and recovery, shutdown checkpoints, GUI contracts, and bounded performance behavior.
 
 The suite deliberately avoids:
 
@@ -146,7 +146,7 @@ The complete Windows launcher runs the deterministic layers in this order:
 
 The Unix `scripts/run_tests.sh` helper still separates non-soak coverage from the soak subset to keep that development-host command practical.
 
-The final v3.2.2 verification executed **1,041/1,041** collected pytest cases with no expected failures, measured **77.9%** combined statement/branch coverage, entered **927/927** executable application callables, killed **17/17** targeted safety mutants, and passed **58/58** deterministic simulation contracts across 54 CSV price paths. The three former strict expected failures have been converted into ordinary regressions.
+The corrected v3.3.0 source tree executed **1,059/1,059** collected pytest cases across isolated test-file partitions with `ResourceWarning` promoted to an error. The instrumented run covered the 1,057 non-timing tests and measured **77.9%** combined statement/branch coverage while entering **945/945** executable application callables; the two elapsed-time-bound large-database tests passed separately without Coverage.py instrumentation. The release also killed **17/17** targeted safety mutants and passed **58/58** deterministic simulation contracts across 54 CSV price paths. The three former strict expected failures remain ordinary passing regressions.
 
 The CSV matrix itself passes cleanly in the offline Linux environment. The full Windows launcher remains the authoritative combined run for Coverage.py, Ruff, Pyright, and native launcher behavior.
 

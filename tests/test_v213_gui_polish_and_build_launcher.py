@@ -30,7 +30,8 @@ def test_v213_flowchart_canvas_resyncs_on_resize_and_uses_visible_scrollbar():
 
 def test_v213_cycle_audit_tabs_and_market_capture_use_available_space():
     assert "tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)" in GUI
-    assert "_fit_table_height_to_all_rows(summary_table" in GUI
+    assert "_fit_table_height_to_rows(" in GUI
+    assert "summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)" in GUI
     assert "preview_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)" in GUI
     assert "timeline_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in GUI
     assert "timeline_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)" in GUI

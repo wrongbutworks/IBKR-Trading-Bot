@@ -117,7 +117,8 @@ def test_timeline_tab_reserves_only_four_table_rows_and_expands_graph():
     assert "timeline_scroll.setMinimumHeight(500)" in section
     assert "timeline_scroll.setMaximumHeight(16777215)" in section
     assert "layout.addWidget(timeline_scroll, 1)" in section
-    assert section.count("max_visible_rows=4, expand_when_overflow=False") == 2
+    assert section.count("max_visible_rows=4,") == 2
+    assert section.count("expand_when_overflow=False,") == 2
     assert "layout.addLayout(split, 0)" in section
     assert "timeline_scroll.setMaximumHeight(390)" not in section
 

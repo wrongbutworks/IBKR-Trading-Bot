@@ -1,4 +1,4 @@
-"""v3.2.2 GUI information and Cycle Audit layout regressions."""
+"""v3.3.0 price-monitor and Cycle Audit layout regressions."""
 
 from __future__ import annotations
 
@@ -90,21 +90,61 @@ def test_price_monitor_has_matching_large_ticker_and_price_styles() -> None:
     assert "QLabel#PriceInstrumentInfo" in source
 
 
-def test_timeline_tables_use_content_width_and_asymmetric_split() -> None:
+def test_timeline_tables_keep_bounded_columns_and_stretch_message_space() -> None:
     source = Path("app/gui.py").read_text(encoding="utf-8")
     timeline = source[
-        source.index("def _timeline_tab(") : source.index("def _scrollable_tab(", source.index("def _timeline_tab("))
+        source.index("def _timeline_tab(") : source.index(
+            "def _scrollable_tab(", source.index("def _timeline_tab(")
+        )
     ]
     records = source[
-        source.index("def _records_table(") : source.index("def _money(", source.index("def _records_table("))
+        source.index("def _records_table(") : source.index(
+            "def _money(", source.index("def _records_table(")
+        )
     ]
 
     assert "stretch_last=False" in records
-    assert "_auto_size_table_columns(table" in records
-    assert "_fit_table_width_to_columns(risk_table, minimum=300, maximum=480)" in timeline
-    assert "split.addWidget(transition_table, 1, Qt.AlignTop)" in timeline
-    assert "split.addWidget(risk_table, 0, Qt.AlignTop)" in timeline
-    assert "split.addWidget(risk_table, 1" not in timeline
+    assert "column_minimums=column_minimums" in records
+    assert "column_maximums=column_maximums" in records
+    assert "item.setToolTip(str(record.get(\"raw_json\") or display_value))" in records
+    assert "column_minimums=(90, 70, 70, 80, 70, 120)" in timeline
+    assert "column_maximums=(110, 90, 90, 110, 90, 165)" in timeline
+    assert "column_minimums=(90, 95, 70, 120)" in timeline
+    assert "column_maximums=(110, 125, 90, 180)" in timeline
+    assert "transition_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)" in timeline
+    assert "risk_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)" in timeline
+    assert "_fit_table_width_to_columns(transition_table" not in timeline
+    assert "_fit_table_width_to_columns(risk_table" not in timeline
+
+
+def test_timeline_tables_fill_the_available_horizontal_layout() -> None:
+    source = Path("app/gui.py").read_text(encoding="utf-8")
+    timeline = source[
+        source.index("def _timeline_tab(") : source.index(
+            "def _scrollable_tab(", source.index("def _timeline_tab(")
+        )
+    ]
+
+    assert "split.addWidget(transition_table, 3)" in timeline
+    assert "split.addWidget(risk_table, 2)" in timeline
+    assert "split.addStretch(1)" not in timeline
+    assert timeline.count("expanding=True,") >= 2
+
+
+def test_market_capture_tab_uses_internal_scrollbars_without_outer_scroll_area() -> None:
+    source = Path("app/gui.py").read_text(encoding="utf-8")
+    start = source.index("def _market_capture_tab(")
+    end = source.index("def _records_table(", start)
+    section = source[start:end]
+
+    assert "max_visible_rows=8" in section
+    assert "expand_when_overflow=False" in section
+    assert "summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)" in section
+    assert "preview_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)" in section
+    assert "file_box.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)" in section
+    assert "file_box.setMaximumHeight(140)" in section
+    assert "return tab" in section
+    assert "return cls._scrollable_tab(tab)" not in section
 
 
 def test_orders_executions_and_decisions_use_top_aligned_table_tabs() -> None:
@@ -113,10 +153,13 @@ def test_orders_executions_and_decisions_use_top_aligned_table_tabs() -> None:
 
     assert audit.count("return self._top_aligned_table_tab(table)") == 3
     helper = audit[
-        audit.index("def _top_aligned_table_tab") : audit.index("def _enriched_details", audit.index("def _top_aligned_table_tab"))
+        audit.index("def _top_aligned_table_tab") : audit.index(
+            "def _enriched_details", audit.index("def _top_aligned_table_tab")
+        )
     ]
     assert "layout.addWidget(table, 0, Qt.AlignTop)" in helper
     assert "layout.addStretch(1)" in helper
+
 
 def test_audit_record_builders_construct_top_aligned_tabs(gui_module) -> None:
     audit = object.__new__(gui_module.CycleAuditDialog)

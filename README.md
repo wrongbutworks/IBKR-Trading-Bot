@@ -4,7 +4,7 @@
   <img src="Images/BouncyBot_logo.png" alt="BouncyBot logo" width="640" />
 </p>
 
-**Current release: v3.2.2**
+**Current release: v3.3.0**
 
 ![Simple-view](Images/Trading-Simple-view.png)
 
@@ -116,6 +116,7 @@ The application records fills, commissions received from IBKR, gross and net P/L
 ## Core features
 
 - PySide6 desktop GUI with connection, strategy, flowchart, history, and reconciliation views.
+- Automatic operating-system light/dark appearance at startup, including live theme changes, neutral Qt Fusion-style dark colors, explicit **View > Light mode / Dark mode** switching, and theme-aware custom-painted audit/strategy visualizations.
 - TWS and IB Gateway connection profiles for live and paper endpoints, with a fixed ten-second local API reconnect cadence that continues indefinitely until reconnection, manual Disconnect, or shutdown.
 - Exact USD/EUR ordinary-stock contract selection through the IBKR API, with SMART routing, positive `conId` verification, route-specific market-rule price increments, order-capability checks, and one contract currency per portable database.
 - Whole-share budget sizing.
@@ -382,7 +383,7 @@ The selected connection profile defines paper versus live mode. Live mode adds e
 
 ### About and project information
 
-Use **About > Info** to view the BouncyBot logo, current application version, the project GitHub link, the IBKR referral link, and the same copyable support addresses listed in the [Thank me](#thank-me) section.
+Use **About > Info** to view the fully centered BouncyBot logo, current application version, the project GitHub link, the IBKR referral link, and the same copyable support addresses listed in the [Thank me](#thank-me) section. The app follows the current Windows light or dark color scheme automatically; no application theme setting is required.
 
 ## Data, backups, and diagnostics
 
@@ -459,17 +460,17 @@ dist\IBKRTradingBot\IBKRTradingBot.exe
 and creates the versioned release folder and final ZIP using the same naming pattern as IBKR Market Replay Lab:
 
 ```text
-release\IBKRTradingBot_3.2.2_Windows\
+release\IBKRTradingBot_3.3.0_Windows\
+  BouncyBot.lnk
   GUI\IBKRTradingBot.exe
   docs\
-  Images\
   README.md
   CHANGELOG.md
   LICENSE
   SECURITY.md
   QUICK_START.txt
 
-release\IBKRTradingBot_3.2.2_Windows.zip
+release\IBKRTradingBot_3.3.0_Windows.zip
 release\SHA256SUMS.txt
 ```
 
@@ -486,6 +487,8 @@ To recreate the virtual environment as part of the build:
 ```
 
 PyInstaller writes detailed output to `build_pyinstaller.log`. Informational stderr output is not treated as failure when PyInstaller returns exit code zero and the expected executable exists.
+
+The source `Images/` directory is not copied into the Windows release root. PyInstaller bundles only `BouncyBot_app_icon.png` and `BouncyBot_logo.png` inside the `GUI/` runtime tree because those two files are required by the executable. README screenshots remain in the source repository. The root `BouncyBot.lnk` records `GUI\IBKRTradingBot.exe` as its relative fallback, so it remains usable when the complete extracted release folder is moved; do not separate the shortcut from the `GUI/` folder.
 
 ## Project structure
 
@@ -539,7 +542,8 @@ Superseded release-specific documents are indexed under [docs/legacy](docs/legac
 
 ## Release history
 
-- [v3.2.2 release note](docs/V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) — richer price-monitor instrument identity, more compact Cycle Audit tables, BouncyBot application branding, and the **About > Info** screen.
+- [v3.3.0 release note](docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) — automatic/manual Fusion themes, non-overlapping About-logo layout, full-width Timeline tables, a scrollbar-contained Market capture tab, and a cleaner Windows release root with a launch shortcut.
+- [v3.2.2 release note](docs/legacy/V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) — richer price-monitor instrument identity, more compact Cycle Audit tables, BouncyBot application branding, and the **About > Info** screen.
 - [v3.2.1 release note](docs/legacy/V3_2_1_INCIDENT_GAP_CORRECTIONS.md) — LSE/LSEETF continuous-session timing, throttled repeated preflight audit warnings, and the distinct `PreflightBlocked` status.
 - [v3.2.0 release note](docs/legacy/V3_2_0_EUR_SMART_AND_RECONNECT.md) — exact USD/EUR ordinary-stock SMART contracts, one contract currency per portable database, contract capability/session checks, and fixed ten-second indefinite local reconnect.
 - [v3.1.2 release note](docs/legacy/V3_1_2_FILL_RECONCILIATION_AND_STAGE3_CLOSE.md) — terminal BUY settlement, idempotent late fills/commissions, strict full-OrderRef isolation, stable diagnostics, corrected execution timestamps, and profitable Stage-3 pre-close liquidation.

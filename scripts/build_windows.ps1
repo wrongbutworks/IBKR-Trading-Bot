@@ -20,7 +20,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$version = "3.2.2"
+$version = "3.3.0"
 $appName = "IBKRTradingBot"
 $releaseName = "${appName}_${version}_Windows"
 $releaseDirectory = Join-Path $root "release"
@@ -187,13 +187,136 @@ Copy-Item -Path (Join-Path $root "CHANGELOG.md") -Destination $releaseRoot -Forc
 Copy-Item -Path (Join-Path $root "LICENSE") -Destination $releaseRoot -Force
 Copy-Item -Path (Join-Path $root "SECURITY.md") -Destination $releaseRoot -Force
 Copy-Item -Path (Join-Path $root "docs") -Destination $releaseRoot -Recurse -Force
-Copy-Item -Path (Join-Path $root "Images") -Destination $releaseRoot -Recurse -Force
+
+$releaseExePath = Join-Path $guiTarget "$appName.exe"
+if (!(Test-Path $releaseExePath)) {
+    throw "Release assembly completed but $releaseExePath was not created."
+}
+
+# The complete source Images directory contains documentation screenshots and
+# does not belong in the Windows runtime root. PyInstaller includes only the two
+# assets required by the executable inside GUI.
+$runtimeIcon = Get-ChildItem -Path $guiTarget -Recurse -File -Filter "BouncyBot_app_icon.png" | Select-Object -First 1
+$runtimeLogo = Get-ChildItem -Path $guiTarget -Recurse -File -Filter "BouncyBot_logo.png" | Select-Object -First 1
+if ($null -eq $runtimeIcon -or $null -eq $runtimeLogo) {
+    throw "The packaged GUI is missing its runtime icon or About-screen logo."
+}
+if (Test-Path (Join-Path $releaseRoot "Images")) {
+    throw "The source Images directory must not be copied to the Windows release root."
+}
+
+$shortcutPath = Join-Path $releaseRoot "BouncyBot.lnk"
+$relativeExePath = "GUI\$appName.exe"
+$shortcutInteropSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace BouncyBot.Build
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    internal struct Win32FindData
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint Reserved0;
+        public uint Reserved1;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string FileName;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]
+        public string AlternateFileName;
+    }
+
+    [ComImport]
+    [Guid("00021401-0000-0000-C000-000000000046")]
+    internal class ShellLink
+    {
+    }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("000214F9-0000-0000-C000-000000000046")]
+    internal interface IShellLinkW
+    {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder file, int maxPath, out Win32FindData data, uint flags);
+        void GetIDList(out IntPtr itemIdList);
+        void SetIDList(IntPtr itemIdList);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int maxName);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder directory, int maxPath);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string directory);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder arguments, int maxPath);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string arguments);
+        void GetHotkey(out short hotkey);
+        void SetHotkey(short hotkey);
+        void GetShowCmd(out int showCommand);
+        void SetShowCmd(int showCommand);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder iconPath, int maxPath, out int iconIndex);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string iconPath, int iconIndex);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string relativePath, uint reserved);
+        void Resolve(IntPtr windowHandle, uint flags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+    }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("0000010B-0000-0000-C000-000000000046")]
+    internal interface IPersistFile
+    {
+        void GetClassID(out Guid classId);
+        [PreserveSig] int IsDirty();
+        void Load([MarshalAs(UnmanagedType.LPWStr)] string fileName, uint mode);
+        void Save([MarshalAs(UnmanagedType.LPWStr)] string fileName, bool remember);
+        void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string fileName);
+        void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string fileName);
+    }
+
+    public static class PortableShortcut
+    {
+        public static void Create(string shortcutPath, string absoluteTarget, string relativeTarget, string description)
+        {
+            object shellLinkObject = new ShellLink();
+            try
+            {
+                IShellLinkW shellLink = (IShellLinkW)shellLinkObject;
+                shellLink.SetPath(absoluteTarget);
+                shellLink.SetRelativePath(relativeTarget, 0);
+                shellLink.SetDescription(description);
+                ((IPersistFile)shellLink).Save(shortcutPath, true);
+            }
+            finally
+            {
+                Marshal.FinalReleaseComObject(shellLinkObject);
+            }
+        }
+    }
+}
+'@
+if (-not ("BouncyBot.Build.PortableShortcut" -as [type])) {
+    Add-Type -TypeDefinition $shortcutInteropSource -Language CSharp
+}
+[BouncyBot.Build.PortableShortcut]::Create(
+    $shortcutPath,
+    $releaseExePath,
+    $relativeExePath,
+    "Launch BouncyBot - IBKR Portable Trading Bot"
+)
+if (!(Test-Path $shortcutPath)) {
+    throw "The release-root shortcut was not created at $shortcutPath."
+}
 
 $quickStart = @"
 BouncyBot - IBKR Portable Trading Bot $version
 
 Start the application:
-  GUI\IBKRTradingBot.exe
+  Double-click BouncyBot.lnk in this folder.
+  Direct executable: GUI\IBKRTradingBot.exe
 
 Keep the complete GUI folder together. Do not copy only the executable.
 The release folder must be writable because the SQLite database and generated
@@ -203,11 +326,6 @@ Use an IBKR paper account for initial validation before live trading.
 "@
 Set-Content -Path (Join-Path $releaseRoot "QUICK_START.txt") -Value $quickStart -Encoding UTF8
 
-$releaseExePath = Join-Path $guiTarget "$appName.exe"
-if (!(Test-Path $releaseExePath)) {
-    throw "Release assembly completed but $releaseExePath was not created."
-}
-
 Write-Host "==> Create versioned release ZIP"
 Compress-Archive -Path $releaseRoot -DestinationPath $releaseZip -CompressionLevel Optimal -Force
 if (!(Test-Path $releaseZip)) {
@@ -215,7 +333,7 @@ if (!(Test-Path $releaseZip)) {
 }
 
 $hashLines = @()
-foreach ($file in @($releaseExePath, $releaseZip)) {
+foreach ($file in @($releaseExePath, $shortcutPath, $releaseZip)) {
     $hash = Get-FileHash -Path $file -Algorithm SHA256
     $relative = $file.Substring($root.Length + 1)
     $hashLines += "$($hash.Hash.ToLowerInvariant())  $relative"

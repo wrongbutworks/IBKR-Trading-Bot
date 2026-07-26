@@ -1,161 +1,141 @@
-BouncyBot - IBKR Portable Trading Bot v3.2.2
-Same-release BouncyBot branding, About information, and documentation maintenance
-Date: 2026-07-26
+BouncyBot - IBKR Portable Trading Bot v3.3.0
+Corrected implementation and verification report
+Release date: 2026-07-26
 
-IMPLEMENTED SCOPE
-=================
+BASELINE
+========
 
-1. BouncyBot application artwork
---------------------------------
+The supplied archive
+IBKR_Trading_Bot_3.2.2_Branding_About_Documentation_Source(1).zip was used as
+the implementation baseline. Its locally modified documentation and source
+content were retained. The release was not reconstructed from an earlier
+repository snapshot.
 
-The user-supplied BouncyBot artwork is stored as a real PNG at:
-
-- Images/BouncyBot_logo.png
-
-A square icon derived from the same artwork is stored at:
-
-- Images/BouncyBot_app_icon.png
-- Images/BouncyBot_app_icon.ico
-
-The ICO contains 16, 24, 32, 48, 64, 128, and 256 pixel entries. The source
-application, main window, and About dialog load the PNG icon through a resource
-helper that works from both the repository and a PyInstaller one-directory
-bundle.
-
-The Windows build script now:
-
-- supplies Images/BouncyBot_app_icon.ico to PyInstaller as the executable icon;
-- bundles the runtime icon and full logo under Images/;
-- validates that all required branding files exist before packaging; and
-- copies the complete Images directory into the versioned release root so the
-  packaged README keeps working.
-
-2. About > Info screen
-----------------------
-
-A new top-level About menu contains an Info action. The dialog shows:
-
-- the full BouncyBot logo;
-- the product name and v3.2.2 version;
-- a clickable project link to
-  https://github.com/IBKR-BouncyBot/IBKR-Trading-Bot;
-- the IBKR referral link from README.md;
-- the Cardano/ADA, Midnight/NIGHT, Ethereum/ETH, and Solana/SOL support
-  addresses from the README Thank me section; and
-- a compact live-order/noncommercial-use notice.
-
-The support addresses are read-only selectable fields so the operator can copy
-without editing them. The external links use Qt's normal browser handling.
-
-3. README and documentation maintenance
----------------------------------------
-
-README.md now places the full logo immediately below its initial title. It also
-documents the About > Info screen, updates the v3.2.2 release-history summary,
-and keeps the Thank me links and support addresses consistent with the dialog.
-
-The root docs directory now contains only the current v3.2.2 release-specific
-note. Superseded v3.0.17, v3.0.18, and v3.0.19 notes are retained under
-`docs/legacy/` and indexed by `docs/legacy/README.md`. Current documentation
-links were updated to point to those archival paths.
-
-4. Existing v3.2.2 GUI scope retained
--------------------------------------
-
-The same-release source still includes the earlier v3.2.2 presentation changes:
-
-- ticker and exact contract information above the current price;
-- content-sized Cycle Audit Timeline columns;
-- an asymmetric Timeline allocation that gives the stage-transition table the
-  remaining width and limits the guard/risk table to its required width; and
-- top-aligned Orders, Executions, and Decision events tables.
-
-5. Safety and compatibility
----------------------------
-
-No strategy, order-construction, price-selection, risk, RTH/session, recovery,
-fill, commission, P/L, reconnect, or persistence decision changed.
-
-No SQLite table, column, index, or migration was added. Existing v3.2.1 and
-v3.2.2 portable databases, active cycles, orders, executions, settings, audit
-events, and market-capture files remain compatible.
-
-TEST CHANGES
-============
-
-Focused regressions cover:
-
-- the submitted full-logo PNG and multi-resolution Windows ICO;
-- README logo placement immediately below the title;
-- source and PyInstaller resource-path resolution;
-- QApplication and MainWindow icon loading;
-- About menu wiring and dialog construction;
-- GitHub/referral link values and parity between README and dialog support
-  addresses;
-- PyInstaller icon/data arguments and release-folder image copying;
-- current-only release-note placement in docs/;
-- retained archival links under docs/legacy/;
-- long-name and classification propagation from ContractDetails;
-- exact price-monitor identity formatting and styling;
-- content-sized Timeline columns and asymmetric table allocation; and
-- top-aligned Orders, Executions, and Decision events tabs.
-
-VERIFICATION RESULTS
+FINAL V3.3.0 CHANGES
 ====================
 
-The exact final working tree produced:
+1. Automatic and manually selectable Fusion themes
 
-- 1,041/1,041 collected pytest cases passed;
-- 0 failures, expected failures, or unexpected passes;
-- ResourceWarning promoted to an error in every complete test partition;
-- 77.9% combined statement/branch coverage against the 75% gate;
-- 927/927 executable application callables entered, including main.py;
-- 17/17 targeted safety mutants killed;
-- 58/58 deterministic strategy simulations passed across 54 CSV paths;
-- 5/5 bounded soak tests passed;
-- all changed application and test modules compiled successfully.
+- Startup checks Qt's operating-system color scheme before the main window is
+  created and applies the corresponding Fusion palette and stylesheet.
+- Supported live QStyleHints.colorSchemeChanged notifications update the
+  running application when the operating-system theme changes.
+- A View menu is placed between File and About and provides Light mode and Dark
+  mode actions for immediate in-process switching.
+- Manual theme choices are session-only and do not add a SQLite setting or
+  database migration.
+- The dark palette uses neutral Qt Fusion-style greys rather than the earlier
+  navy/slate treatment.
+- Cached state widgets and custom-painted Timeline, Profit Guard, strategy graph,
+  and flowchart surfaces are refreshed after a theme change.
 
-The 1,041 tests were executed in eight mutually exclusive file partitions due
-to the Linux host command-duration limit. The partition results were:
+2. About-screen logo layout
 
-- 216 passed;
-- 45 passed;
-- 212 passed;
-- 48 passed;
-- 212 passed;
-- 48 passed;
-- 211 passed;
-- 49 passed.
+- The logo is contained in a dedicated fixed-height panel.
+- Its scaled size is bounded for high-DPI displays and retains aspect ratio.
+- The title, version, and repository link are laid out after the complete logo
+  panel, preventing text overlap and lower-edge clipping.
 
-The same eight partitions were appended into one Coverage.py data set before
-the final report and callable-entry gate were generated.
+3. Cycle Audit Timeline tables
 
-Ruff and Pyright were unavailable as runnable tools in the offline Linux
-validation environment. The changed import blocks were manually reviewed and
-all Python files compiled. The authoritative Windows `run_all_tests.bat`
-Ruff/Pyright gate must still be run before producing the production executable.
+- Compact fields retain bounded content-based widths.
+- Both tables expand across the available horizontal row instead of leaving a
+  large unused area.
+- The transition and guard/risk tables receive a 3:2 width allocation.
+- Each Message column stretches into remaining space; horizontal scrolling is
+  retained only for genuinely over-wide content.
+- Full cell values remain available through tooltips.
 
-A native Windows/PySide6 visual and packaging smoke test remains external. It
-should verify the taskbar/title-bar/executable icon at normal Windows icon
-sizes, the About dialog at the intended DPI settings, external browser links,
-and the packaged README logo.
+4. Cycle Audit Market capture layout
 
-RELEASE ARTIFACT VALIDATION
-===========================
+- The Market capture tab no longer uses a page-level vertical scroll area.
+- Metadata, captured-row preview, and capture-file sections fit directly inside
+  the tab viewport.
+- Individual data boxes own their vertical scrollbars when their content exceeds
+  the bounded section height.
 
-The final release artifacts were validated as follows:
+5. Windows release layout
 
-- the source ZIP contains exactly 339 intended source, image, documentation,
-  and test files under one `IBKR-Trading-Bot-main/` root;
-- SQLite databases, logs, captures, backups, caches, coverage output, virtual
-  environments, build output, and Git metadata are excluded;
-- the ZIP passed full compressed-data integrity validation;
-- a clean extraction matched the final working tree byte-for-byte across all
-  339 packaged files;
-- the clean extraction independently passed all 1,041 pytest cases, 17/17
-  mutation probes, 58/58 simulation contracts, and Python compilation;
-- the binary unified patch applies cleanly to the pristine v3.2.2 baseline and
-  reconstructs all 339 final files byte-for-byte, including PNG/ICO assets and
-  the moved v3.0.19 release note; and
-- SHA-256 hashes for the source ZIP, patch, and external verification report
-  are recorded in the release checksum manifest.
+- PyInstaller remains a one-directory build under GUI/.
+- Only BouncyBot_app_icon.png and BouncyBot_logo.png are included as runtime
+  image data, plus BouncyBot_app_icon.ico as the executable icon.
+- The complete source Images/ directory is not copied to the portable Windows
+  release root.
+- BouncyBot.lnk is created in the release root and targets
+  GUI\IBKRTradingBot.exe, including a relative-path fallback for portability.
+- QUICK_START.txt documents both the shortcut and direct executable path.
+
+6. Release and documentation maintenance
+
+- Application, package, build, changelog, security, documentation, and tests
+  remain versioned as v3.3.0.
+- The v3.2.2 release note remains archived under docs/legacy/.
+- docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md describes the final
+  corrected v3.3.0 behavior.
+
+SAFETY AND COMPATIBILITY
+========================
+
+No strategy transition, broker order construction/submission, price selection,
+quantity calculation, risk guard, session policy, reconnect logic,
+reconciliation, recovery, execution accounting, commission handling, P/L
+calculation, or persisted setting was changed.
+
+No SQLite table, column, index, migration, or theme field was added. Existing
+v3.2.2 databases, settings, active cycles, orders, executions, audit events,
+backups, exports, and market-capture files remain compatible.
+
+Theme detection and manual theme selection are presentation-only and cannot
+affect trading state.
+
+CORRECTIVE-REVISION VERIFICATION
+================================
+
+Repository tests
+----------------
+
+- 1,059/1,059 collected pytest cases passed across isolated test-file
+  partitions.
+- ResourceWarning was promoted to an error throughout the partitioned run.
+- 55 focused tests covering the corrected v3.3.0 GUI, theme, About, audit-layout,
+  Windows-build, main-entry, import-stub, and documentation behavior passed.
+
+Coverage and deterministic verification
+---------------------------------------
+
+- 77.9% combined statement/branch coverage for app/ and main.py; required gate:
+  75.0%.
+- 945/945 effective executable application callables were entered.
+- The two runtime-threshold large-database performance tests passed separately
+  without Coverage.py instrumentation, because instrumentation invalidates their
+  elapsed-time limits. The remaining 1,057 tests produced the coverage report.
+- 17/17 targeted safety mutants were killed.
+- 58/58 deterministic simulation contracts passed across 54 CSV files.
+
+Supplemental verification
+-------------------------
+
+- Python compileall passed for app/, tests/, scripts/, and main.py.
+- git diff --check passed.
+- Ruff and Pyright were not installed in the offline Linux environment and are
+  not recorded as passing. The Windows run_all_tests.bat workflow still requires
+  both tools.
+
+Platform-specific boundary
+--------------------------
+
+A native Windows executable was not built in this Linux environment. PyInstaller
+binaries and Windows .lnk behavior are platform-specific. Run build_windows.bat
+on Windows to assemble and smoke-test the binary package before publishing it.
+
+SOURCE RELEASE DELIVERABLE
+==========================
+
+- IBKR_Trading_Bot_3.3.0_Dark_Mode_Audit_Windows_Release_Corrected_Source.zip
+
+The source ZIP is assembled from Git-tracked files and excludes .git data,
+virtual environments, caches, bytecode, coverage output, build output, runtime
+databases, and logs. It retains the complete source Images/ directory because
+README and documentation assets are part of the source release. The Windows
+binary build script omits that directory from the portable release root while
+bundling the two runtime image assets inside GUI/.
