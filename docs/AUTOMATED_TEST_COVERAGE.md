@@ -42,7 +42,7 @@ The callable gate is derived from the effective function map in `coverage.json`.
 
 The counts are a snapshot of v3.3.0. The gate recalculates them from the current source and coverage report on every full test run. Adding a callable without a test causes the callable-coverage step to fail.
 
-The corrected v3.3.0 source tree executed **1,059/1,059** collected pytest cases across isolated test-file partitions with `ResourceWarning` promoted to an error. The instrumented run covered the 1,057 non-timing tests and measured **77.9%** combined statement/branch coverage while entering **945/945** executable application callables. The two elapsed-time-bound large-database tests passed separately without Coverage.py instrumentation. The release also killed **17/17** targeted safety mutants and passed **58/58** deterministic simulation contracts across 54 CSV price paths.
+The corrected v3.3.0 source tree executed **1,089/1,089** collected pytest cases across isolated coverage partitions with `ResourceWarning` promoted to an error. The combined instrumented run included the ordinary, accelerated-soak, and elapsed-time-bound large-database tests, measured **77.5%** combined statement/branch coverage, and entered **991/991** executable application callables. The release also killed **17/17** targeted safety mutants and passed **58/58** deterministic simulation contracts across 54 CSV price paths.
 
 ## Test layers
 

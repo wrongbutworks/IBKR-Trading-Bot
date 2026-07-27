@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import queue
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -91,6 +92,7 @@ from .order_diagnostics import native_trailing_order_diagnostics
 from .paths import database_path, debug_captures_dir, exports_dir
 from .storage import BotStorage
 from .strategy import StrategyAction, StrategyEngine, make_order_ref
+from .watchdog import append_emergency_log
 
 
 class _HeadlessSignalInstance:
@@ -157,6 +159,7 @@ class TradingController:
     MAX_IDLE_WAIT_SECONDS = 0.25
     RECONNECT_INTERVAL_SECONDS = 10.0
     BUY_PREFLIGHT_AUDIT_THROTTLE_SECONDS = 60.0
+    STORAGE_FAULT_PROBE_INTERVAL_SECONDS = 2.0
 
     # Zero means do not add a second rate limit inside the strategy cadence when
     # reading the cached TWS subscription handle. The adapter stamps actual
@@ -175,12 +178,31 @@ class TradingController:
         self._thread = threading.Thread(target=self._thread_main, name="IBKRBotWorker", daemon=True)
         self._thread_started = False
         self._shutdown_complete = threading.Event()
+        self._worker_started_at = utc_now_iso()
+        self._worker_last_heartbeat_monotonic = time.monotonic()
+        self._worker_current_operation = "initializing"
+        self._worker_operation_started_monotonic = self._worker_last_heartbeat_monotonic
+        self._worker_snapshot_sequence = 0
+        self._worker_failure_message = ""
+        self._worker_failure_at = ""
 
         self.connection = self.storage.load_connection_settings()
         self.strategy = self.storage.load_strategy_settings()
         self.adapter = IbAsyncTwsAdapter()
         self.connected = False
         self.status = "Disconnected"
+        self._storage_fault_active = False
+        self._storage_fault_message = ""
+        self._storage_fault_operation = ""
+        self._storage_fault_started_at = ""
+        self._storage_fault_started_monotonic = 0.0
+        self._storage_fault_last_probe_at = ""
+        self._storage_fault_last_probe_monotonic = 0.0
+        self._storage_fault_probe_succeeded = False
+        self._storage_fault_restart_recommended = False
+        self._storage_fault_repeat_log_monotonic = 0.0
+        self._watchdog_auto_recovery_request: Optional[dict[str, Any]] = None
+        self._watchdog_auto_recovery_pending = False
         self.active_cycle: Optional[CycleState] = self.storage.get_latest_active_cycle()
         self.contract: Optional[QualifiedContract] = None
         self._last_snapshot_emit = 0.0
@@ -352,10 +374,191 @@ class TradingController:
     def db_path(self) -> Path:
         return self.storage.db_path
 
+    def worker_is_alive(self) -> bool:
+        """Return whether the single broker/strategy worker is currently alive."""
+        return bool(self._thread_started and self._thread.is_alive())
+
+    def resume_after_watchdog_restart(self, request: dict[str, Any]) -> None:
+        """Queue fail-closed recovery for one exact persisted cycle.
+
+        The replacement process receives a one-time watchdog token in ``main``.
+        This controller entry point never creates a new cycle: it only permits
+        the normal startup/reconciliation path to resume the exact cycle named
+        in the authenticated handoff request.
+        """
+        if self._stop_event.is_set():
+            return
+        self._commands.put(("WATCHDOG_AUTO_RECOVER", {"request": dict(request or {})}))
+
+    def _write_emergency_log(
+        self,
+        message: str,
+        *,
+        exc: Optional[BaseException] = None,
+        context: Optional[dict[str, Any]] = None,
+    ) -> None:
+        append_emergency_log(
+            message,
+            exc=exc,
+            context=context,
+            base_dir=self.storage.db_path.parent,
+        )
+
+    def _begin_worker_operation(self, name: str) -> None:
+        now = time.monotonic()
+        self._worker_current_operation = str(name or "unknown")
+        self._worker_operation_started_monotonic = now
+        self._worker_last_heartbeat_monotonic = now
+
+    def _complete_worker_operation(self) -> None:
+        now = time.monotonic()
+        self._worker_last_heartbeat_monotonic = now
+        self._worker_current_operation = "idle"
+        self._worker_operation_started_monotonic = now
+
+    def _worker_health_snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        operation_age = max(0.0, now - self._worker_operation_started_monotonic)
+        heartbeat_age = max(0.0, now - self._worker_last_heartbeat_monotonic)
+        return {
+            "thread_started": bool(self._thread_started),
+            "thread_alive": self.worker_is_alive(),
+            "started_at": self._worker_started_at,
+            "snapshot_sequence": int(self._worker_snapshot_sequence),
+            "heartbeat_age_seconds": heartbeat_age,
+            "current_operation": self._worker_current_operation,
+            "current_operation_age_seconds": operation_age,
+            "failure_message": self._worker_failure_message,
+            "failure_at": self._worker_failure_at,
+        }
+
+    def _storage_fault_snapshot(self) -> dict[str, Any]:
+        elapsed = (
+            max(0.0, time.monotonic() - self._storage_fault_started_monotonic)
+            if self._storage_fault_started_monotonic > 0
+            else 0.0
+        )
+        return {
+            "active": bool(self._storage_fault_active),
+            "message": self._storage_fault_message,
+            "operation": self._storage_fault_operation,
+            "started_at": self._storage_fault_started_at,
+            "elapsed_seconds": elapsed,
+            "last_probe_at": self._storage_fault_last_probe_at,
+            "probe_succeeded": bool(self._storage_fault_probe_succeeded),
+            "restart_recommended": bool(self._storage_fault_restart_recommended),
+        }
+
+    def _enter_storage_fault(self, operation: str, exc: BaseException) -> None:
+        """Fail closed without calling SQLite again from the error path."""
+        now = time.monotonic()
+        first_fault = not self._storage_fault_active
+        if first_fault:
+            self._storage_fault_started_at = utc_now_iso()
+            self._storage_fault_started_monotonic = now
+        self._storage_fault_active = True
+        self._storage_fault_operation = str(operation or "SQLite operation")
+        self._storage_fault_message = str(exc or "Unknown SQLite failure")
+        self._storage_fault_probe_succeeded = False
+        self._storage_fault_restart_recommended = False
+        self.status = (
+            "Storage unavailable - trading is fail-closed. Broker callbacks and "
+            "the GUI remain active while BouncyBot prepares a full-process restart."
+        )
+        if first_fault or now - self._storage_fault_repeat_log_monotonic >= 30.0:
+            self._storage_fault_repeat_log_monotonic = now
+            self._write_emergency_log(
+                "SQLite storage fault entered; all strategy and broker actions are blocked.",
+                exc=exc,
+                context={
+                    "operation": self._storage_fault_operation,
+                    "active_cycle_id": getattr(self.active_cycle, "id", None),
+                    "active_cycle_stage": getattr(getattr(self.active_cycle, "stage", None), "value", None),
+                },
+            )
+        try:
+            self.signals.connection_changed.emit(False, self.status)
+        except Exception as signal_exc:
+            self._write_emergency_log(
+                "Could not publish the storage-fault status through Qt.",
+                exc=signal_exc,
+            )
+
+    def _probe_storage_fault_if_due(self) -> None:
+        """Use a short independent transaction to decide when restart is safe."""
+        if not self._storage_fault_active:
+            return
+        now = time.monotonic()
+        if (
+            self._storage_fault_last_probe_monotonic > 0
+            and now - self._storage_fault_last_probe_monotonic
+            < self.STORAGE_FAULT_PROBE_INTERVAL_SECONDS
+        ):
+            return
+        self._storage_fault_last_probe_monotonic = now
+        self._storage_fault_last_probe_at = utc_now_iso()
+        try:
+            writable = bool(self.storage.probe_writable(timeout_seconds=0.25))
+        except Exception as exc:
+            self._storage_fault_probe_succeeded = False
+            self._storage_fault_message = str(exc or self._storage_fault_message)
+            if now - self._storage_fault_repeat_log_monotonic >= 30.0:
+                self._storage_fault_repeat_log_monotonic = now
+                self._write_emergency_log(
+                    "SQLite storage-fault probe still cannot acquire a write transaction.",
+                    exc=exc,
+                    context={"operation": self._storage_fault_operation},
+                )
+            return
+        if not writable:
+            return
+        self._storage_fault_probe_succeeded = True
+        self._storage_fault_restart_recommended = True
+        self.status = (
+            "Storage write access is available again. Trading remains fail-closed "
+            "until the watchdog restarts BouncyBot and reconciles the exact cycle."
+        )
+
+    def _commit_waiting_transition(
+        self,
+        next_cycle: CycleState,
+        actions: list[StrategyAction],
+    ) -> bool:
+        """Persist a market-driven transition before publishing or executing it."""
+        try:
+            self.storage.upsert_cycle(next_cycle)
+        except sqlite3.Error as exc:
+            self._enter_storage_fault("persist waiting-stage transition", exc)
+            return False
+        self.active_cycle = next_cycle
+        self._execute_actions(actions, next_cycle)
+        return True
+
+    def _broker_mutation_blocked_by_storage_fault(
+        self,
+        operation: str,
+        cycle: Optional[CycleState] = None,
+    ) -> bool:
+        """Return ``True`` when a broker-changing call must remain fail-closed."""
+        if not self._storage_fault_active:
+            return False
+        self.status = (
+            f"{operation} blocked: SQLite storage is unavailable. No broker order "
+            "will be submitted, cancelled or replaced before full-process restart "
+            "and reconciliation."
+        )
+        # Do not call _log here: it intentionally uses the unavailable store.
+        # The first storage fault already wrote the emergency-file diagnostic.
+        return True
+
     def start_thread(self) -> None:
         if not self._thread_started:
-            self._thread.start()
             self._thread_started = True
+            try:
+                self._thread.start()
+            except Exception:
+                self._thread_started = False
+                raise
 
     def shutdown(self) -> None:
         self._auto_reconnect_enabled = False
@@ -364,10 +567,10 @@ class TradingController:
         if self._thread_started and self._thread.is_alive():
             self._thread.join(timeout=8)
             if self._thread.is_alive():
-                try:
-                    self.storage.add_event("WARN", "Worker shutdown did not complete within the deterministic shutdown timeout.")
-                except Exception:
-                    pass
+                self._write_emergency_log(
+                    "Worker shutdown did not complete within the deterministic shutdown timeout.",
+                    context={"current_operation": self._worker_current_operation},
+                )
 
     def shutdown_and_wait(self, timeout: float = 8.0) -> bool:
         self.shutdown()
@@ -807,6 +1010,24 @@ class TradingController:
     def _trading_status_snapshot(self, database_facts: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         """Build the compact top-bar Trading state and full blocker details."""
         cycle = self.active_cycle
+        if self._storage_fault_active:
+            message = (
+                "SQLite storage is unavailable. All strategy evaluation and broker "
+                "actions are blocked until a full-process restart and reconciliation complete."
+            )
+            return {
+                "summary": "Storage fault",
+                "state": "risk",
+                "tooltip": f"{message} {self._storage_fault_message}".strip(),
+                "blockers": [self._trading_blocker("BUY/SELL", "storage", message, "Storage")],
+            }
+        if self._watchdog_auto_recovery_pending:
+            return {
+                "summary": "Recovering",
+                "state": "waiting",
+                "tooltip": "Watchdog restart recovery is validating the exact persisted cycle and broker state.",
+                "blockers": [],
+            }
         if self._startup_resume_required:
             return {
                 "summary": "Start required",
@@ -947,6 +1168,9 @@ class TradingController:
         return self._snapshot_database_cache
 
     def _run_database_cycle(self, *, force: bool = False) -> None:
+        if self._storage_fault_active:
+            self._probe_storage_fault_if_due()
+            return
         self._refresh_snapshot_database_cache(force=force)
 
     def emit_snapshot(self, force: bool = False, *, refresh_database: bool = True) -> None:
@@ -988,6 +1212,7 @@ class TradingController:
             # cannot keep reporting a previously green snapshot after updates
             # have stopped arriving.
             self.price_snapshot.update(price_snapshot)
+        self._worker_snapshot_sequence += 1
         snapshot = {
             "connected": self.connected,
             "status": self.status,
@@ -1005,6 +1230,13 @@ class TradingController:
             "trading_status": self._trading_status_snapshot(database_facts),
             "price_snapshot": price_snapshot,
             "price_poll_interval_seconds": self.PRICE_POLL_INTERVAL_SECONDS,
+            "worker_health": self._worker_health_snapshot(),
+            "storage_fault": self._storage_fault_snapshot(),
+            "watchdog_auto_recovery": {
+                "pending": bool(self._watchdog_auto_recovery_pending),
+                "expected_cycle_id": (self._watchdog_auto_recovery_request or {}).get("expected_cycle_id"),
+                "reason": (self._watchdog_auto_recovery_request or {}).get("reason", ""),
+            },
             "worker_cadences": {
                 "broker_seconds": self.BROKER_CADENCE_SECONDS,
                 "strategy_seconds": self.STRATEGY_CADENCE_SECONDS,
@@ -1150,11 +1382,14 @@ class TradingController:
         return max(0.001, float(value))
 
     def _thread_main(self) -> None:
+        unexpected_failure: Optional[BaseException] = None
         try:
+            self._begin_worker_operation("startup")
             self._log("INFO", "Application worker started.")
             self._run_database_cycle(force=True)
             self.emit_snapshot(force=True, refresh_database=False)
             self._run_maintenance_cycle(force=True)
+            self._complete_worker_operation()
 
             now = time.monotonic()
             next_broker = now
@@ -1167,14 +1402,20 @@ class TradingController:
             while not self._stop_event.is_set():
                 now = time.monotonic()
                 if now >= next_broker:
+                    self._begin_worker_operation("broker cadence")
                     try:
                         broker_ready_for_strategy = self._run_broker_cycle(process_timeout=0.0)
+                    except sqlite3.Error as exc:
+                        broker_ready_for_strategy = False
+                        self._enter_storage_fault("broker cadence", exc)
                     except BrokerAdapterError as exc:
                         broker_ready_for_strategy = False
                         self._handle_broker_connection_problem(exc)
                     except Exception as exc:
                         broker_ready_for_strategy = False
                         self._log("ERROR", f"Broker cadence error: {exc}")
+                    finally:
+                        self._complete_worker_operation()
                     next_broker = time.monotonic() + self._worker_interval(self.BROKER_CADENCE_SECONDS)
 
                 if self._stop_event.is_set():
@@ -1182,41 +1423,65 @@ class TradingController:
 
                 now = time.monotonic()
                 if now >= next_strategy:
-                    if broker_ready_for_strategy:
+                    if broker_ready_for_strategy and not self._storage_fault_active:
+                        self._begin_worker_operation("strategy cadence")
                         try:
                             self._run_strategy_cycle(price_timeout=0.0)
+                        except sqlite3.Error as exc:
+                            self._enter_storage_fault("strategy cadence", exc)
                         except BrokerAdapterError as exc:
                             broker_ready_for_strategy = False
                             self._handle_broker_connection_problem(exc)
                         except Exception as exc:
                             self._log("ERROR", f"Strategy cadence error: {exc}")
                             if self.active_cycle:
-                                self.active_cycle = StrategyEngine.mark_error(self.active_cycle, str(exc))
-                                self.storage.upsert_cycle(self.active_cycle)
+                                failed_cycle = StrategyEngine.mark_error(self.active_cycle, str(exc))
+                                try:
+                                    self.storage.upsert_cycle(failed_cycle)
+                                except sqlite3.Error as storage_exc:
+                                    self._enter_storage_fault(
+                                        "persist strategy error state",
+                                        storage_exc,
+                                    )
+                                else:
+                                    self.active_cycle = failed_cycle
+                        finally:
+                            self._complete_worker_operation()
                     next_strategy = time.monotonic() + self._worker_interval(self.STRATEGY_CADENCE_SECONDS)
 
                 now = time.monotonic()
                 if now >= next_database:
+                    self._begin_worker_operation("database cadence")
                     try:
                         self._run_database_cycle(force=True)
+                    except sqlite3.Error as exc:
+                        self._enter_storage_fault("database cadence", exc)
                     except Exception as exc:
                         self._log("WARN", f"Database snapshot cadence error: {exc}")
+                    finally:
+                        self._complete_worker_operation()
                     next_database = time.monotonic() + self._worker_interval(self.DATABASE_CADENCE_SECONDS)
 
                 now = time.monotonic()
                 if now >= next_gui:
+                    self._begin_worker_operation("GUI snapshot cadence")
                     try:
                         self.emit_snapshot(refresh_database=False)
                     except Exception as exc:
                         self._log("WARN", f"GUI snapshot cadence error: {exc}")
+                    finally:
+                        self._complete_worker_operation()
                     next_gui = time.monotonic() + self._worker_interval(self.GUI_CADENCE_SECONDS)
 
                 now = time.monotonic()
                 if now >= next_maintenance:
+                    self._begin_worker_operation("maintenance cadence")
                     try:
                         self._run_maintenance_cycle()
                     except Exception as exc:
                         self._log("WARN", f"Maintenance cadence error: {exc}")
+                    finally:
+                        self._complete_worker_operation()
                     next_maintenance = time.monotonic() + self._worker_interval(self.MAINTENANCE_CADENCE_SECONDS)
 
                 if self._stop_event.is_set():
@@ -1234,10 +1499,13 @@ class TradingController:
                     self._worker_interval(self.MAX_IDLE_WAIT_SECONDS),
                     max(0.0, next_deadline - now),
                 )
+                self._begin_worker_operation("command wait")
                 try:
                     command = self._commands.get(timeout=wait_timeout)
                 except queue.Empty:
+                    self._complete_worker_operation()
                     continue
+                self._complete_worker_operation()
                 # shutdown() sets the stop event as well as waking this queue. If
                 # an older command was already queued, do not execute it after
                 # shutdown has begun (it could otherwise submit a broker action).
@@ -1248,14 +1516,26 @@ class TradingController:
                 # command. This preserves the fail-closed order-submission race
                 # guarantee while Queue.get() provides immediate command wakeup.
                 if self.connected and self.adapter.is_connected():
+                    self._begin_worker_operation("pre-command broker callbacks")
                     try:
-                        self._pump_broker_callbacks(process_timeout=0.0)
+                        if self._storage_fault_active:
+                            self._pump_broker_transport_only(process_timeout=0.0)
+                        else:
+                            self._pump_broker_callbacks(process_timeout=0.0)
+                    except sqlite3.Error as exc:
+                        self._enter_storage_fault("pre-command broker callbacks", exc)
                     except BrokerAdapterError as exc:
                         self._handle_broker_connection_problem(exc)
                     except Exception as exc:
                         self._log("WARN", f"Pre-command broker callback error: {exc}")
-                self._process_queued_command(*command)
-                self._drain_commands(max_commands=63)
+                    finally:
+                        self._complete_worker_operation()
+                self._begin_worker_operation(f"command {command[0]}")
+                try:
+                    self._process_queued_command(*command)
+                    self._drain_commands(max_commands=63)
+                finally:
+                    self._complete_worker_operation()
                 broker_ready_for_strategy = False
 
                 # Commands may connect, disconnect, stop, or alter strategy state.
@@ -1265,7 +1545,33 @@ class TradingController:
                 next_broker = min(next_broker, now)
                 next_strategy = min(next_strategy, now)
                 next_gui = min(next_gui, now)
-
+        except BaseException as exc:
+            unexpected_failure = exc
+            self._worker_failure_message = f"{type(exc).__name__}: {exc}"
+            self._worker_failure_at = utc_now_iso()
+            self.status = (
+                "Worker terminated unexpectedly - trading monitoring is not running. "
+                "The GUI watchdog will restart BouncyBot."
+            )
+            self._write_emergency_log(
+                "Unhandled exception terminated the BouncyBot worker.",
+                exc=exc,
+                context={
+                    "current_operation": self._worker_current_operation,
+                    "active_cycle_id": getattr(self.active_cycle, "id", None),
+                    "active_cycle_stage": getattr(getattr(self.active_cycle, "stage", None), "value", None),
+                },
+            )
+            try:
+                self.emit_snapshot(force=True, refresh_database=False)
+            except BaseException as snapshot_exc:
+                self._write_emergency_log(
+                    "Could not emit the final worker-failure snapshot.",
+                    exc=snapshot_exc,
+                )
+        finally:
+            self._worker_current_operation = "shutdown cleanup"
+            self._worker_operation_started_monotonic = time.monotonic()
             try:
                 if self.adapter.is_connected():
                     self.adapter.disconnect()
@@ -1275,33 +1581,49 @@ class TradingController:
                 self._market_capture.shutdown(wait=True, timeout=5.0)
             except Exception:
                 pass
-            try:
-                self.storage.add_event("INFO", "Application worker stopped cleanly during app shutdown.")
-            except Exception:
-                pass
-            try:
-                self.storage.backup_database("app_shutdown")
-            except Exception:
-                pass
+            if unexpected_failure is None and not self._storage_fault_active:
+                self._log("INFO", "Application worker stopped cleanly during app shutdown.")
+                try:
+                    self.storage.backup_database("app_shutdown")
+                except Exception:
+                    pass
             self.connected = False
-            self.status = "Stopped"
+            if unexpected_failure is None:
+                self.status = "Stopped"
             try:
-                self._run_database_cycle(force=True)
+                if not self._storage_fault_active:
+                    self._run_database_cycle(force=True)
             except Exception:
                 pass
-            self.emit_snapshot(force=True, refresh_database=False)
-            self._run_maintenance_cycle(force=True)
-        finally:
+            try:
+                self.emit_snapshot(force=True, refresh_database=False)
+            except Exception:
+                pass
+            try:
+                self._run_maintenance_cycle(force=True)
+            except Exception:
+                pass
+            self._worker_last_heartbeat_monotonic = time.monotonic()
+            self._worker_current_operation = "stopped"
+            self._worker_operation_started_monotonic = self._worker_last_heartbeat_monotonic
             self._shutdown_complete.set()
 
     def _process_queued_command(self, name: str, payload: dict[str, Any]) -> None:
         ack = payload.pop("_ack_event", None) if isinstance(payload, dict) else None
         try:
             self._handle_command(name, payload)
+        except sqlite3.Error as exc:
+            self._enter_storage_fault(f"command {name}", exc)
         except Exception as exc:
             self._log("ERROR", f"Command {name} failed: {exc}")
             self.status = f"Error: {exc}"
-            self.signals.connection_changed.emit(self.connected, self.status)
+            try:
+                self.signals.connection_changed.emit(self.connected, self.status)
+            except Exception as signal_exc:
+                self._write_emergency_log(
+                    f"Could not publish command failure for {name}.",
+                    exc=signal_exc,
+                )
         finally:
             if ack is not None:
                 try:
@@ -1320,7 +1642,16 @@ class TradingController:
             processed += 1
 
     def _handle_command(self, name: str, payload: dict[str, Any]) -> None:
-        if name == "CONNECT":
+        if self._storage_fault_active and name != "SHUTDOWN":
+            self.status = (
+                f"Command {name} blocked: SQLite storage is unavailable and trading is fail-closed "
+                "until the watchdog completes a full-process restart."
+            )
+            self.emit_snapshot(force=True, refresh_database=False)
+            return
+        if name == "WATCHDOG_AUTO_RECOVER":
+            self._prepare_watchdog_auto_recovery(dict(payload.get("request") or {}))
+        elif name == "CONNECT":
             self._connect(payload["settings"])
         elif name == "START_PLATFORM":
             self._start_ibkr_platform(payload["settings"])
@@ -1416,6 +1747,220 @@ class TradingController:
         elif name == "SHUTDOWN":
             self._auto_reconnect_enabled = False
             self._stop_event.set()
+
+    @staticmethod
+    def _watchdog_stage_text(cycle: Optional[CycleState]) -> str:
+        stage = getattr(cycle, "stage", None)
+        return str(getattr(stage, "value", stage) or "")
+
+    def _watchdog_request_mismatch(
+        self,
+        request: dict[str, Any],
+        cycle: Optional[CycleState],
+    ) -> Optional[str]:
+        if cycle is None:
+            return "the expected SQLite cycle no longer exists"
+        if not bool(request.get("was_monitoring_active")):
+            return "the final worker snapshot did not prove that strategy monitoring was active"
+        if bool(request.get("startup_resume_required")):
+            return "the cycle already required an explicit operator Start before the watchdog incident"
+        if bool(request.get("recovery_required")):
+            return "broker/local reconciliation was already required before the watchdog incident"
+        if bool(getattr(cycle, "recovery_required", False)):
+            return "the persisted cycle requires manual reconciliation"
+        expected_signature = request.get("expected_cycle_signature")
+        if not isinstance(expected_signature, dict) or not expected_signature:
+            return "the restart handoff does not contain an exact broker-relevant cycle signature"
+        if recovery_cycle_signature(cycle) != expected_signature:
+            return "broker-relevant persisted cycle facts changed since the final healthy worker snapshot"
+        expected_id = str(request.get("expected_cycle_id") or "").strip()
+        if not expected_id or str(cycle.id) != expected_id:
+            return "the persisted cycle ID does not match the one-time restart handoff"
+        expected_stage = str(request.get("expected_cycle_stage") or "").strip()
+        actual_stage = self._watchdog_stage_text(cycle)
+        allowed = {
+            Stage.WAIT_INITIAL_DROP.value,
+            Stage.BUY_TRAIL_ACTIVE.value,
+            Stage.WAIT_RISE_TRIGGER.value,
+            Stage.SELL_TRAIL_ACTIVE.value,
+        }
+        if expected_stage not in allowed or actual_stage != expected_stage:
+            return f"the persisted stage changed from {expected_stage or '-'} to {actual_stage or '-'}"
+        expected_ticker = str(request.get("ticker") or "").upper().strip()
+        if expected_ticker and str(cycle.ticker or "").upper().strip() != expected_ticker:
+            return "the persisted ticker changed"
+        expected_con_id = request.get("con_id")
+        try:
+            expected_con_id_value = int(expected_con_id or 0)
+        except Exception:
+            expected_con_id_value = 0
+        try:
+            actual_con_id_value = int(cycle.con_id or 0)
+        except Exception:
+            actual_con_id_value = 0
+        if expected_con_id_value > 0 and actual_con_id_value != expected_con_id_value:
+            return "the exact IBKR conId changed"
+        refs = request.get("order_refs") or {}
+        if isinstance(refs, dict):
+            for label, attribute in (
+                ("buy", "buy_order_ref"),
+                ("protective_sell", "protective_sell_order_ref"),
+                ("sell", "sell_order_ref"),
+            ):
+                expected_ref = str(refs.get(label) or "").strip()
+                if expected_ref and str(getattr(cycle, attribute, "") or "").strip() != expected_ref:
+                    return f"the persisted {label.replace('_', ' ')} OrderRef changed"
+        return None
+
+    def _reject_watchdog_auto_recovery(self, reason: str) -> None:
+        self._watchdog_auto_recovery_pending = False
+        self.status = (
+            "Watchdog restart completed, but automatic strategy recovery was blocked: "
+            f"{reason}. Use the Reconciliation screen before resuming manually."
+        )
+        self._recovery_required = True
+        self._log("ERROR", self.status, self.active_cycle)
+        self.emit_snapshot(force=True, refresh_database=False)
+
+    def _prepare_watchdog_auto_recovery(self, request: dict[str, Any]) -> None:
+        """Validate the one-time handoff before connecting or resuming anything."""
+        self._watchdog_auto_recovery_request = dict(request or {})
+        eligible = bool(
+            request.get("auto_resume")
+            and request.get("was_monitoring_active")
+            and not request.get("startup_resume_required")
+            and not request.get("recovery_required")
+        )
+        if not eligible:
+            self._watchdog_auto_recovery_pending = False
+            self.status = (
+                "Watchdog restart completed. No exact active cycle was eligible for "
+                "automatic recovery; BouncyBot remains stopped."
+            )
+            self._log("WARN", self.status, self.active_cycle)
+            self.emit_snapshot(force=True, refresh_database=False)
+            return
+        expected_id = str(request.get("expected_cycle_id") or "").strip()
+        cycle = self.storage.get_cycle(expected_id) if expected_id else None
+        latest = self.storage.get_latest_active_cycle()
+        mismatch = self._watchdog_request_mismatch(request, cycle)
+        if mismatch is None and (latest is None or str(latest.id) != expected_id):
+            mismatch = "a different active SQLite cycle is now the newest recovery target"
+        if mismatch is not None:
+            self.active_cycle = latest or cycle or self.active_cycle
+            self._reject_watchdog_auto_recovery(mismatch)
+            return
+
+        assert cycle is not None
+        self.active_cycle = cycle
+        self.strategy = self._settings_for_repeat_cycle(cycle)
+        self._startup_resume_required = True
+        self._watchdog_auto_recovery_pending = True
+        self._auto_reconnect_enabled = True
+        self.status = (
+            f"Watchdog restart recovered exact cycle {cycle.cycle_number} for {cycle.ticker}. "
+            "Connecting and reconciling broker state before monitoring resumes."
+        )
+        self._log("WARN", self.status, cycle)
+
+        if not self.connected or not self.adapter.is_connected():
+            try:
+                self._connect(self.connection)
+            except BrokerAdapterError:
+                # _connect leaves fixed-interval reconnect enabled. The pending
+                # exact-cycle request remains fail-closed until connectivity is
+                # restored and the broker cadence can reconcile it.
+                self.emit_snapshot(force=True, refresh_database=False)
+                return
+        self._attempt_watchdog_auto_recovery()
+        self.emit_snapshot(force=True, refresh_database=False)
+
+    def _attempt_watchdog_auto_recovery(self) -> bool:
+        """Run the existing Start/reconciliation path for one exact cycle only."""
+        if not self._watchdog_auto_recovery_pending or self._storage_fault_active:
+            return False
+        request = dict(self._watchdog_auto_recovery_request or {})
+        expected_id = str(request.get("expected_cycle_id") or "").strip()
+        try:
+            cycle = self.storage.get_cycle(expected_id) if expected_id else None
+            latest = self.storage.get_latest_active_cycle()
+        except sqlite3.Error as exc:
+            self._enter_storage_fault("validate watchdog recovery cycle", exc)
+            return False
+        mismatch = self._watchdog_request_mismatch(request, cycle)
+        if mismatch is None and (latest is None or str(latest.id) != expected_id):
+            mismatch = "another active SQLite cycle replaced the expected recovery target"
+        if mismatch is not None:
+            self.active_cycle = latest or cycle or self.active_cycle
+            self._reject_watchdog_auto_recovery(mismatch)
+            return False
+        if not self.connected or not self.adapter.is_connected():
+            return False
+        connectivity = self._adapter_connectivity_snapshot()
+        self._broker_connectivity = connectivity
+        if connectivity.get("upstream_connected") is not True or self._upstream_recovery_pending:
+            return False
+
+        assert cycle is not None
+        self.active_cycle = cycle
+        settings = self._settings_for_repeat_cycle(cycle)
+        self.strategy = settings
+        try:
+            self._start_strategy(settings)
+        except sqlite3.Error as exc:
+            self._enter_storage_fault("watchdog strategy recovery", exc)
+            return False
+        except BrokerAdapterError as exc:
+            self._handle_broker_connection_problem(exc)
+            return False
+        except Exception as exc:
+            self._watchdog_auto_recovery_pending = False
+            self._recovery_required = True
+            self.status = (
+                "Watchdog restart could not safely resume the exact cycle: "
+                f"{exc}. Manual reconciliation is required."
+            )
+            self._write_emergency_log(
+                "Unexpected exception during watchdog exact-cycle recovery.",
+                exc=exc,
+                context={"expected_cycle_id": expected_id},
+            )
+            self._log("ERROR", self.status, self.active_cycle)
+            self.emit_snapshot(force=True, refresh_database=False)
+            return False
+
+        current = self.active_cycle
+        active_stages = {
+            Stage.WAIT_INITIAL_DROP,
+            Stage.BUY_TRAIL_ACTIVE,
+            Stage.WAIT_RISE_TRIGGER,
+            Stage.SELL_TRAIL_ACTIVE,
+            Stage.CYCLE_COMPLETE,
+        }
+        if (
+            current is not None
+            and current.stage in active_stages
+            and not self._startup_resume_required
+            and not self._recovery_required
+        ):
+            self._watchdog_auto_recovery_pending = False
+            self.status = (
+                f"Watchdog restart and broker reconciliation completed for {current.ticker}; "
+                f"monitoring resumed in stage {current.stage.value}."
+            )
+            self._log("INFO", self.status, current)
+            self.emit_snapshot(force=True, refresh_database=False)
+            return True
+
+        self._watchdog_auto_recovery_pending = False
+        self.status = (
+            "Watchdog restart completed, but broker reconciliation did not establish "
+            "a safe resumable state. Manual reconciliation is required."
+        )
+        self._recovery_required = True
+        self._log("ERROR", self.status, current)
+        self.emit_snapshot(force=True, refresh_database=False)
+        return False
 
     def _platform_name(self, settings: Optional[ConnectionSettings] = None) -> str:
         settings = settings or self.connection
@@ -1985,6 +2530,11 @@ class TradingController:
             if not ref:
                 continue
             try:
+                if self._broker_mutation_blocked_by_storage_fault(
+                    "Recovery order cancellation",
+                    self.active_cycle,
+                ):
+                    break
                 self.adapter.cancel_order(ref, order_id)
                 cancelled += 1
                 self.storage.add_event("WARN", f"Recovery cancel requested for orphan app-owned order {ref}.", raw={"order_ref": ref, "order_id": order_id})
@@ -2813,11 +3363,18 @@ class TradingController:
                 return
             for ref, order_id in self._open_app_order_refs_for_cycle(cycle):
                 try:
+                    if self._broker_mutation_blocked_by_storage_fault(
+                        "Stop-action order cancellation",
+                        cycle,
+                    ):
+                        break
                     self.adapter.cancel_order(ref, order_id)
                     self.storage.update_order_status(ref, "CancelRequested", order_id=order_id)
                     self._log("INFO", f"Cancel requested for {ref}.", cycle)
                 except Exception as exc:
                     self._log("ERROR", f"Cancel failed for {ref}: {exc}", cycle)
+            if self._storage_fault_active:
+                return
             cycle.stage = Stage.STOPPED
             cycle.touch()
             self.active_cycle = cycle
@@ -2908,6 +3465,11 @@ class TradingController:
 
         for ref, order_id in self._open_app_order_refs_for_cycle(cycle):
             try:
+                if self._broker_mutation_blocked_by_storage_fault(
+                    "Close-by-market order cancellation",
+                    cycle,
+                ):
+                    break
                 self.adapter.cancel_order(ref, order_id)
                 self.storage.update_order_status(ref, "CancelRequested", order_id=order_id)
                 if ref == cycle.protective_sell_order_ref:
@@ -2920,6 +3482,9 @@ class TradingController:
                 self._log("INFO", f"Close-by-market selected: cancel requested for {ref} before closing app-owned position.", cycle)
             except Exception as exc:
                 self._log("ERROR", f"Close-by-market cancel failed for {ref}: {exc}", cycle)
+
+        if self._storage_fault_active:
+            return
 
         cycle.touch()
         self.active_cycle = cycle
@@ -3328,6 +3893,8 @@ class TradingController:
             self._log("WARN", f"Could not drain broker callback events: {exc}")
             return
         for event in events:
+            if self._storage_fault_active:
+                return
             if not isinstance(event, dict):
                 continue
             self._handle_connectivity_broker_event(event)
@@ -3348,11 +3915,15 @@ class TradingController:
                 )
             except Exception as exc:
                 self._log("WARN", f"Could not persist broker callback event {event_type}: {exc}", cycle)
+                if self._storage_fault_active:
+                    return
             if event_type in {"EXEC_DETAILS", "COMMISSION_REPORT"}:
                 try:
                     self._apply_execution_callback_event(event_type, event, cycle)
                 except Exception as exc:
                     self._log("ERROR", f"Could not reconcile broker execution callback {event_type}: {exc}", cycle)
+                    if self._storage_fault_active:
+                        return
             if event_type == "ORDER_ERROR":
                 if cycle is None:
                     # A shared Master API feed can expose another portable
@@ -3759,7 +4330,43 @@ class TradingController:
                     self._handle_broker_connection_problem(exc)
                     return self._adapter_connectivity_snapshot()
         self._drain_broker_events()
+        if self._storage_fault_active:
+            connectivity = self._adapter_connectivity_snapshot()
+            self._broker_connectivity = connectivity
+            self._last_broker_refresh_monotonic = time.monotonic()
+            return connectivity
         return self._refresh_broker_connectivity_snapshot()
+
+    def _pump_broker_transport_only(self, process_timeout: float = 0.0) -> dict[str, Any]:
+        """Keep the IBKR socket serviced without applying events during a storage fault.
+
+        Draining order/execution callbacks can mutate cycle state and requires
+        SQLite persistence.  Once storage is unhealthy, those callbacks remain
+        queued only for the short watchdog-restart window; the replacement
+        process then obtains authoritative positions, open orders and executions
+        through the existing reconciliation path.
+        """
+        process_events = getattr(self.adapter, "process_events", None)
+        if callable(process_events):
+            try:
+                process_events(max(0.0, float(process_timeout)))
+            except Exception as exc:
+                self._write_emergency_log(
+                    "IBKR transport pumping failed while SQLite was unavailable.",
+                    exc=exc,
+                    context={"storage_operation": self._storage_fault_operation},
+                )
+        try:
+            connectivity = self._adapter_connectivity_snapshot()
+        except Exception as exc:
+            self._write_emergency_log(
+                "Could not inspect IBKR connectivity during a storage fault.",
+                exc=exc,
+            )
+            return dict(self._broker_connectivity or {})
+        self._broker_connectivity = connectivity
+        self._last_broker_refresh_monotonic = time.monotonic()
+        return connectivity
 
     def _run_broker_cycle(self, process_timeout: float = 0.0) -> bool:
         """Run the independent broker cadence and report strategy readiness.
@@ -3770,6 +4377,10 @@ class TradingController:
         submission occurs while the upstream link is unavailable or
         post-reconnect reconciliation is pending.
         """
+        if self._storage_fault_active:
+            if self.connected and self.adapter.is_connected():
+                self._pump_broker_transport_only(process_timeout)
+            return False
         if not self._ensure_connection_alive():
             return False
         connectivity = self._pump_broker_callbacks(process_timeout)
@@ -3777,8 +4388,15 @@ class TradingController:
             if str(connectivity.get("state") or "") not in {"upstream_disconnected", "api_port_reset"}:
                 self._handle_upstream_connectivity_lost(connectivity)
             return False
+        if self._storage_fault_active:
+            # Keep processing IBKR callbacks and connectivity while all trading
+            # and reconciliation paths remain fail-closed.
+            return False
         if self._upstream_recovery_pending:
             self._recover_upstream_session_if_needed()
+            return False
+        if self._watchdog_auto_recovery_pending:
+            self._attempt_watchdog_auto_recovery()
             return False
         return True
 
@@ -3789,6 +4407,8 @@ class TradingController:
         subscription without sleeping. Explicit confirmation, startup recovery,
         and the compatibility ``_tick`` wrapper retain their bounded wait.
         """
+        if self._storage_fault_active or self._watchdog_auto_recovery_pending:
+            return
         if not self.connected or not self.adapter.is_connected():
             return
         connectivity = self._broker_connectivity
@@ -3849,9 +4469,7 @@ class TradingController:
                 is_rth=is_rth,
                 rth_message=message,
             )
-            self.active_cycle = next_cycle
-            self.storage.upsert_cycle(next_cycle)
-            self._execute_actions(actions, next_cycle)
+            self._commit_waiting_transition(next_cycle, actions)
         elif cycle.stage == Stage.BUY_TRAIL_ACTIVE and cycle.buy_order_ref:
             self._cancel_buy_before_close_if_needed(cycle)
             cycle = self.active_cycle or cycle
@@ -4715,6 +5333,11 @@ class TradingController:
             return
         if str(cycle.buy_status or "") == "CancelRequested":
             return
+        if self._broker_mutation_blocked_by_storage_fault(
+            "Session-timing BUY cancellation",
+            cycle,
+        ):
+            return
         try:
             self.adapter.cancel_order(cycle.buy_order_ref, cycle.buy_order_id)
             cycle.buy_status = "CancelRequested"
@@ -4831,6 +5454,11 @@ class TradingController:
         if protective_working:
             if bool(getattr(cycle, "close_before_rth_cancel_requested", False)):
                 return True
+            if self._broker_mutation_blocked_by_storage_fault(
+                "Protective SELL cancellation before RTH close",
+                cycle,
+            ):
+                return True
             try:
                 self.adapter.cancel_order(cycle.protective_sell_order_ref or "", cycle.protective_sell_order_id)
                 cycle.protective_sell_status = "CancelRequested"
@@ -4903,6 +5531,11 @@ class TradingController:
                 return
             if self._close_before_rth_order_is_working(cycle.sell_order_ref, cycle.sell_status):
                 if not bool(getattr(cycle, "close_before_rth_cancel_requested", False)):
+                    if self._broker_mutation_blocked_by_storage_fault(
+                        "Close-before-RTH market SELL cancellation",
+                        cycle,
+                    ):
+                        return
                     try:
                         self.adapter.cancel_order(cycle.sell_order_ref, cycle.sell_order_id)
                         cycle.sell_status = "CancelRequested"
@@ -5009,6 +5642,11 @@ class TradingController:
 
         if bool(getattr(cycle, "close_before_rth_cancel_requested", False)):
             return
+        if self._broker_mutation_blocked_by_storage_fault(
+            "Final SELL-trail cancellation before RTH close",
+            cycle,
+        ):
+            return
         try:
             self.adapter.cancel_order(cycle.sell_order_ref, cycle.sell_order_id)
             cycle.sell_status = "CancelRequested"
@@ -5088,7 +5726,17 @@ class TradingController:
         rolled back to the previous waiting stage so the bot does not believe an
         unconfirmed order is active.
         """
+        if self._broker_mutation_blocked_by_storage_fault(
+            "Strategy broker action",
+            cycle,
+        ):
+            return
         for action in actions:
+            if self._broker_mutation_blocked_by_storage_fault(
+                f"Strategy action {action.action_type}",
+                cycle,
+            ):
+                return
             try:
                 if action.action_type == "PLACE_BUY_TRAIL":
                     self._place_trailing_order(cycle, action, "BUY")
@@ -5102,6 +5750,11 @@ class TradingController:
                     self._place_market_order(cycle, action, "SELL")
                 elif action.action_type == "CANCEL_ORDER":
                     try:
+                        if self._broker_mutation_blocked_by_storage_fault(
+                            "Order cancellation",
+                            cycle,
+                        ):
+                            return
                         self.adapter.cancel_order(action.payload["order_ref"], action.payload.get("order_id"))
                         self.storage.update_order_status(action.payload["order_ref"], "CancelRequested", order_id=action.payload.get("order_id"))
                         if action.payload.get("role") == "protective_sell" and self.active_cycle:
@@ -5872,6 +6525,11 @@ class TradingController:
             pass
         order_type = "PROTECTIVE_TRAIL" if role == "PROTECTIVE_SELL" else "TRAIL"
         self._record_order_intent(cycle, payload, side, order_type, role=role)
+        if self._broker_mutation_blocked_by_storage_fault(
+            f"{rollback_side} trailing-order submission",
+            cycle,
+        ):
+            return
         try:
             handle = self.adapter.place_trailing_stop(
                 contract=self.contract,
@@ -5999,6 +6657,11 @@ class TradingController:
         except Exception:
             pass
         self._record_order_intent(cycle, payload, side, "MKT")
+        if self._broker_mutation_blocked_by_storage_fault(
+            f"{rollback_side} market-order submission",
+            cycle,
+        ):
+            return
         try:
             handle = self.adapter.place_market_order(
                 contract=self.contract,
@@ -6597,6 +7260,11 @@ class TradingController:
         except Exception:
             pass
         self._record_order_intent(cycle, payload, "SELL", "MKT")
+        if self._broker_mutation_blocked_by_storage_fault(
+            "Close-before-RTH market SELL submission",
+            cycle,
+        ):
+            return False
         try:
             handle = self.adapter.place_market_order(
                 contract=self.contract,
@@ -7000,7 +7668,32 @@ class TradingController:
         )
 
     def _log(self, level: str, message: str, cycle: Optional[CycleState] = None) -> None:
+        """Record an event without allowing diagnostics to kill the worker."""
         ticker = cycle.ticker if cycle else None
         cycle_id = cycle.id if cycle else None
-        self.storage.add_event(level, message, ticker=ticker, cycle_id=cycle_id)
-        self.signals.event_logged.emit(message)
+        try:
+            self.storage.add_event(level, message, ticker=ticker, cycle_id=cycle_id)
+        except sqlite3.Error as exc:
+            # Event logging uses the same SQLite store as cycle persistence. A
+            # write failure therefore activates the same fail-closed recovery
+            # state, but _enter_storage_fault itself never calls _log.
+            self._enter_storage_fault("persist audit event", exc)
+        except Exception as exc:
+            self._write_emergency_log(
+                "SQLite event logging failed.",
+                exc=exc,
+                context={
+                    "level": level,
+                    "message": message,
+                    "ticker": ticker,
+                    "cycle_id": cycle_id,
+                },
+            )
+        try:
+            self.signals.event_logged.emit(message)
+        except Exception as exc:
+            self._write_emergency_log(
+                "Qt event signal emission failed.",
+                exc=exc,
+                context={"level": level, "message": message},
+            )

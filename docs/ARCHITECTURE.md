@@ -26,7 +26,9 @@ TradingController (worker thread)
 
 ## Entry point and portable process boundary
 
-`main.py` creates the Qt application, applies a stable light palette, acquires the single-instance lock, creates the controller/window, connects Qt's session-management commit signal, and starts the Qt event loop. A Windows-controlled session termination calls the GUI's non-interactive checkpoint handler through a direct Qt connection. The handler saves resume state but does not stop the worker or exit from inside the session callback; this keeps the application usable if another program cancels shutdown. If shutdown proceeds, normal event-loop cleanup stops the worker and releases the process lock.
+`main.py` creates the Qt application, applies the selected Fusion palette, acquires the single-instance lock, creates the controller/window, connects Qt's session-management commit signal, and starts the Qt event loop. A Windows-controlled session termination calls the GUI's non-interactive checkpoint handler through a direct Qt connection. The handler saves resume state but does not stop the worker or exit from inside the session callback; this keeps the application usable if another program cancels shutdown. If shutdown proceeds, normal event-loop cleanup stops the worker and releases the process lock.
+
+For a watchdog replacement, the GUI exits Qt with a dedicated internal code and a one-time handoff token. `main.py` attempts controller shutdown, releases the same single-instance lock, and uses `os.execv` to replace the complete source or frozen process. The replacement consumes the handoff once before the worker starts. There is no second worker thread and no intentional overlap between old and new BouncyBot processes.
 
 `app/paths.py` defines the portable application directory:
 
@@ -44,7 +46,8 @@ The database and generated folders are derived from this location. The applicati
 - displays controller snapshots, price diagnostics, stages, blockers, and audit events;
 - renders the five-stage flowchart and cycle timeline;
 - provides trade history and Reconciliation actions;
-- disables unsafe or locked controls without deciding the trading strategy.
+- disables unsafe or locked controls without deciding the trading strategy;
+- independently watches controller snapshot delivery and renders a fail-closed stale-worker override before requesting full-process replacement.
 
 The GUI does not decide when a BUY or SELL should occur. Graphs and projections are explanatory views. `TradingController` and `StrategyEngine` are authoritative.
 
@@ -138,6 +141,8 @@ The existing `app_settings` key/value table also stores the portable database co
 
 The controller’s database snapshot cadence reduces repeated read-only connections used for recent events, history totals, and top-bar guard display. This cache is diagnostic only and can be up to one cadence old. Trading-state writes and order authorization checks are not deferred to it.
 
+A SQLite exception activates an in-memory storage-fault boundary. Event reporting falls back to a plain file outside SQLite, all broker mutations and strategy advancement are blocked, and only IBKR transport servicing plus GUI health snapshots continue. A short independent write transaction is rolled back after proving main-database write access; successful recovery requests process replacement rather than resuming inside potentially compromised storage state.
+
 The resume-checkpoint transaction writes the latest connection draft, strategy draft, active cycle, `last_resume_checkpoint` metadata, and its audit event together. The controller normally performs this in the worker after applying safe active-cycle edits without re-evaluating the last market price. A bounded direct-storage fallback uses the same checkpoint ID, and the transaction begins with an immediate write lock so a delayed worker and fallback cannot duplicate the logical checkpoint.
 
 The storage layer also creates restore-validated online backups and audit bundles. Its persisted BUY and SELL fills define the application-owned unsold quantity used by BUY gating, Stop, window-close, and Reconciliation actions. It is not the sole source for live order status; recovery compares it with broker facts.
@@ -149,6 +154,8 @@ The storage layer also creates restore-validated online backups and audit bundle
 - GUI commands are queued to the worker and wake its interruptible wait immediately.
 - Broker, strategy, GUI, database-snapshot, and maintenance deadlines are independent, but all controller/broker side effects remain serialized on the same worker.
 - Worker snapshots and events are emitted back through Qt signals.
+- The Qt main thread owns a one-second watchdog timer. It measures delivery of the worker's normal 500 ms snapshots, not a value computed by the worker itself.
+- When snapshots stop, the GUI independently ages the last market-data timestamp, invalidates cached connection/RTH claims for display, disables broker-dependent controls, and can request complete process replacement.
 - A lightweight headless signal implementation is used only by tests/build validation when `IBKR_BOT_HEADLESS_SIGNALS=1`.
 - Broker calls are kept in the worker path to avoid concurrent access from GUI callbacks.
 - Market-capture ZIP writing uses a separate bounded writer path after the full post-fill window is available.
@@ -195,7 +202,7 @@ Read-only broker refresh and audit export remain available in both cases. A reco
 
 A local API socket and the Gateway/TWS upstream IBKR link are independent. Loss of an enabled local socket starts fixed ten-second reconnect attempts that continue indefinitely until success, manual Disconnect, or shutdown. An upstream outage invalidates quote freshness and pauses the worker without pretending the local socket closed or repeatedly tearing it down. After 1101/1102 restoration, app-owned open orders and recent executions are reconciled before normal processing resumes. A fresh post-recovery ticker event is still required before cached quote fields become strategy-usable.
 
-A stored active cycle requires an explicit Start/resume after launch. The application does not automatically recreate missing orders when facts are uncertain.
+A stored active cycle requires an explicit Start/resume after an ordinary launch. A one-time watchdog replacement can request automatic continuation only for the exact cycle already under supervision, and only through the same broker reconciliation path. It does not automatically recreate missing orders when facts are uncertain.
 
 ## Market-data capture architecture
 

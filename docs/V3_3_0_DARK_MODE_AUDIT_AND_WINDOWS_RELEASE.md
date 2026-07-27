@@ -1,19 +1,24 @@
-# v3.3.0 Fusion dark mode, audit layout, and Windows release packaging
+# v3.3.0 Fusion dark mode, audit layout, Windows packaging, and worker recovery
 
 **Release:** v3.3.0
 
-**Release date:** 2026-07-26
-**Type:** GUI presentation, Windows packaging, documentation, and release maintenance
+**Original release date:** 2026-07-26
+
+**Corrective update date:** 2026-07-27
+
+**Type:** GUI presentation, Windows packaging, fail-closed worker/storage recovery, documentation, and release maintenance
 
 ## Summary
 
 v3.3.0 adds an operating-system-aware light/dark appearance with an explicit
 **View** menu override, corrects the About-logo layout, makes the Cycle Audit
 Timeline tables use the available width, keeps Market capture inside one tab
-viewport, and simplifies the portable Windows release root. The strategy state
-machine, order construction, risk controls, broker reconciliation, SQLite
-schema, session handling, execution accounting, and persisted settings are
-unchanged.
+viewport, and simplifies the portable Windows release root. The corrective
+update also detects a dead or blocked controller worker from the independent Qt
+GUI thread, fails closed on SQLite errors, and performs rate-limited full-process
+replacement with exact-cycle broker reconciliation for unattended operation.
+Strategy formulas, price selection, order types/construction, quantity and risk
+calculations, fill/commission accounting, and the SQLite schema remain unchanged.
 
 ## Automatic and selectable Fusion themes
 
@@ -90,6 +95,46 @@ top-level `Images/` directory was added.
 The repository and source release retain the complete `Images/` directory so
 README image links and documentation screenshots continue to work on GitHub.
 
+## Worker watchdog, storage fault, and automatic recovery
+
+The GUI now treats delivery of the controller's normal 500 ms snapshots as an
+independent health signal. It warns after 3 seconds without a new snapshot,
+marks the worker unresponsive after 15 seconds, and requests complete process
+replacement after 30 seconds. A terminated worker triggers the same path after
+a short startup grace period. While stale, cached green connection/data states
+are overridden, RTH becomes unknown, displayed market-data age continues to
+increase, and broker-dependent controls are disabled.
+
+Replacement exits Qt, attempts bounded controller shutdown, releases the
+portable-folder single-instance lock, and uses `os.execv` to replace the same
+source or frozen process. It never starts a second worker or an overlapping
+BouncyBot process. A short-lived one-time token authorizes only that immediate
+replacement.
+
+Automatic continuation is narrower than ordinary startup recovery. It is
+available only when the final healthy snapshot proved an exact Stage 1-4 cycle
+was already being monitored without an existing startup/recovery requirement.
+The replacement rechecks the exact cycle ID, stage, ticker, conId, stored order
+references, and broker-relevant local signature, then uses the existing
+connection and reconciliation path. Any contract, order, fill, execution,
+position, recovery, or fresh-market-data uncertainty remains manual.
+
+SQLite failures now enter an in-memory fail-closed storage state. Event logging
+falls back to `debug_reports/worker_emergency.log`; strategy evaluation and all
+broker-changing calls are blocked while the IBKR transport and GUI health
+snapshots continue. A short separate `BEGIN IMMEDIATE` write probe is rolled back
+after proving database write access. A healthy worker is replaced only after
+that probe succeeds; a dead or hard-stalled worker is still replaced if the last
+snapshot reported a storage fault.
+
+Restart-loop protection allows three rapid attempts in 15 minutes, then imposes
+a five-minute cooldown between further attempts. `IBKR_BOT_AUTO_RESTART=0`
+disables automatic replacement without disabling the watchdog display. Audit
+bundles include the emergency log and restart history and copy only a
+redacted form of any pending one-time handoff. Detailed behavior and operational
+limits are documented in
+[`WORKER_WATCHDOG_AND_AUTO_RECOVERY.md`](WORKER_WATCHDOG_AND_AUTO_RECOVERY.md).
+
 ## Documentation structure
 
 The v3.2.2 release note has moved to `docs/legacy/`. This v3.3.0 note is the only
@@ -100,11 +145,17 @@ a record of that release.
 ## Compatibility
 
 v3.3.0 adds no SQLite table, column, index, data migration, or persisted setting.
-Existing v3.2.2 portable databases, settings, active cycles, orders, executions,
-audit events, backups, exports, and market-capture files remain compatible.
+The storage-health probe performs DDL and an insert only inside a transaction
+that is always rolled back. Existing v3.2.2 portable databases, settings, active
+cycles, orders, executions, audit events, backups, exports, and market-capture
+files remain compatible.
 
-There is no trading-algorithm, broker-order, recovery, account-scope, currency,
-commission, session, reconnect, or P/L behavior change in this release.
+There is no strategy-formula, price-source, order-type/construction, quantity,
+account-scope, currency, commission, session-rule, fill-accounting, or P/L
+behavior change. Recovery behavior is intentionally hardened: ordinary startup
+remains manual, while an authenticated immediate watchdog replacement may resume
+only the exact already-monitored cycle after existing broker reconciliation
+succeeds.
 
 ## Verification
 
@@ -122,6 +173,14 @@ Focused regressions cover:
 - omission of the source `Images/` directory from the Windows release root;
 - release-root shortcut creation and checksum inclusion; and
 - v3.3.0 metadata, documentation placement, and backward compatibility.
+- one-time restart handoff authentication and token redaction;
+- restart-loop rate limiting and fail-closed history errors;
+- non-throwing emergency diagnostics and SQLite write-probe rollback;
+- persist-before-publish order-transition behavior;
+- storage-fault broker-action suppression and transport-only pumping;
+- dead/stalled worker GUI detection, advancing stale age, and unknown RTH override;
+- process-lock release before replacement and no second worker; and
+- exact-cycle automatic continuation through the existing reconciliation path.
 
 Final repository gate results are recorded in `IMPLEMENTATION_TEST_REPORT.txt`.
 The Windows executable itself must be assembled on Windows with

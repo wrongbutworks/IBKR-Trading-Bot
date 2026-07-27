@@ -8,27 +8,38 @@ This file summarizes behavior-changing and maintenance releases represented by t
 
 - Added automatic operating-system light/dark appearance. BouncyBot detects Qt's current system color scheme before applying its Fusion palette and follows supported live `QStyleHints.colorSchemeChanged` notifications without adding a persisted user setting.
 - Added **View > Light mode** and **View > Dark mode** between the File and About menus for immediate in-process appearance switching. The checked menu item follows both manual changes and later system-theme notifications.
-- Added dark-aware rendering for ordinary Qt controls and for the custom-painted Cycle Timeline, Profit Guard, strategy graph, and strategy flowchart surfaces, labels, grids, semantic states, and hover cards. The dark palette now uses neutral Qt Fusion-style greys instead of the initial navy/slate treatment.
+- Added dark-aware rendering for ordinary Qt controls and for the custom-painted Cycle Timeline, Profit Guard, strategy graph, and strategy flowchart surfaces, labels, grids, semantic states, and hover cards. The dark palette uses neutral Qt Fusion-style greys.
 - Added a release-root `BouncyBot.lnk` shortcut to `GUI\IBKRTradingBot.exe`; it stores the GUI path as a relative fallback so the complete extracted release folder remains portable. `QUICK_START.txt` documents both launch paths and the shortcut is included in the release checksum manifest.
+- Added an independent Qt-main-thread watchdog for the single controller worker. It warns after 3 seconds without a new controller snapshot, marks the worker unresponsive after 15 seconds, and requests a full-process replacement after 30 seconds. A dead worker triggers the same replacement path immediately after the startup grace period.
+- Added `debug_reports/worker_emergency.log` for traceback and storage-fault diagnostics that do not depend on SQLite, plus one-time restart handoff and rate-limit history files outside the database.
 
 ### Changed
 
-- Corrected the About dialog logo row by placing the bounded image in a dedicated fixed-height panel. The title/version/link rows are now laid out after that panel and cannot overlap the artwork on high-DPI Windows displays.
+- Corrected the About dialog logo row by placing the bounded image in a dedicated fixed-height panel. The title/version/link rows are laid out after that panel and cannot overlap the artwork on high-DPI Windows displays.
 - Kept bounded content widths for compact Cycle Audit Timeline fields while making both tables fill the available horizontal row. Their message columns stretch into remaining space, with a 3:2 transition-to-risk table allocation and conditional scrolling only when content genuinely exceeds the viewport.
-- Removed the outer vertical scrollbar from the Cycle Audit Market capture tab. Its metadata table, captured-row preview, and capture-file list now use bounded internal viewports and their own vertical scrollbars so all sections fit the main audit window.
+- Removed the outer vertical scrollbar from the Cycle Audit Market capture tab. Its metadata table, captured-row preview, and capture-file list use bounded internal viewports and their own vertical scrollbars so all sections fit the main audit window.
 - Stopped copying the complete source `Images/` directory into the Windows release root. PyInstaller still bundles the runtime application icon and About logo inside the `GUI/` one-directory bundle; source-only screenshots and README artwork remain in the repository/source release.
+- Made controller event logging non-throwing. A SQLite failure now enters a visible fail-closed storage state and falls back to the plain emergency log instead of allowing error reporting itself to terminate the worker.
+- Persisted market-driven waiting-stage transitions before publishing them in memory or executing the corresponding broker action. A failed persistence attempt leaves the previous cycle state authoritative and submits no order.
+- During a storage fault, all strategy evaluation and broker-changing calls are blocked while the worker continues servicing the IBKR transport and emitting health snapshots. A short independent `BEGIN IMMEDIATE` transaction probes real write availability; normal automatic replacement begins only after that probe succeeds. A dead or hard-stalled worker still triggers process replacement even when the last snapshot reported a storage fault.
+- Automatic recovery replaces the complete process with `os.execv`; it never starts a second controller thread or overlapping BouncyBot process. The replacement receives a short-lived one-time token and may resume only the exact previously monitored cycle when its persisted broker-relevant signature, cycle ID, stage, ticker, conId, and stored order references still match. The existing connection, exact-contract, broker-order, execution, position, and fresh-data reconciliation path must still succeed. Any mismatch remains fail-closed for manual reconciliation.
+- Limited automatic replacement to three rapid attempts in a 15-minute window, followed by a five-minute cooldown between further attempts. Set `IBKR_BOT_AUTO_RESTART=0` to disable automatic replacement while retaining watchdog warnings.
+- Added watchdog diagnostics to audit bundles. The one-time restart token is always redacted and the raw handoff file is never copied.
 - Increased application, package, Windows release, documentation, and current regression metadata from v3.2.2 to v3.3.0.
 
 ### Safety and compatibility
 
-- No strategy, order construction/submission, price selection, quantity, risk, session, reconnect, reconciliation, recovery, fill, commission, P/L, or persistence behavior changed.
-- No SQLite table, column, index, migration, or persisted theme setting was added. Existing v3.2.2 databases, settings, active cycles, orders, executions, audits, backups, exports, and market captures remain compatible.
-- System theme detection affects presentation only. Failure to obtain or monitor a system color scheme falls back to the light appearance and cannot affect trading state.
+- Strategy formulas, price-source priority, quantity calculations, order types, trailing/market order construction, RTH rules, risk limits, fill accounting, commission handling, P/L calculations, and account-position scope are unchanged.
+- The single-worker ownership model is unchanged. The watchdog performs full-process replacement only after Qt exits and the portable-folder single-instance lock is released; it never runs two workers against the same cycle.
+- Ordinary manual application startup remains conservative: a stored active cycle still requires explicit Start/reconciliation. Automatic resume is a narrow exception available only to the authenticated immediate replacement of a process whose final healthy snapshot proved that the exact cycle was already being monitored.
+- No SQLite table, column, index, or migration was added. The write probe creates and inserts into a temporary candidate table only inside a transaction that is always rolled back. Existing v3.2.2 databases, settings, active cycles, orders, executions, audits, backups, exports, and market captures remain compatible.
+- Process replacement cannot automate TWS/IB Gateway credentials, two-factor approval, Gateway startup, operating-system recovery, power restoration, or a frozen Qt main event loop. Uncertain startup or reconciliation facts remain manual rather than guessed.
 
 ### Documentation and tests
 
 - Added focused coverage for light/dark palette roles, system-theme signal handling, View-menu theme switching, neutral Fusion-dark stylesheet conversion, theme refresh of cached state widgets and custom-painted views, non-overlapping About-logo layout, full-width Timeline table allocation, Market capture internal scrolling, runtime-only image packaging, shortcut creation/checksums, current release metadata, and archived v3.2.2 documentation.
-- Added [`docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md`](docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) and archived the v3.2.2 release note under `docs/legacy/`.
+- Added watchdog/storage regressions covering one-time handoffs, exact-cycle signatures, restart-loop protection, non-throwing diagnostics, real SQLite write probes, persist-before-publish ordering, broker-mutation blocking, transport-only callback pumping, dead/stalled worker detection, storage-fault recovery, GUI-side stale-age/RTH invalidation, process-lock release before replacement, exact-cycle reconciliation gates, and audit-token redaction.
+- Updated [`docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md`](docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md), added [`docs/WORKER_WATCHDOG_AND_AUTO_RECOVERY.md`](docs/WORKER_WATCHDOG_AND_AUTO_RECOVERY.md), and retained the v3.2.2 release note under `docs/legacy/`.
 
 ## v3.2.2
 

@@ -209,6 +209,17 @@ PyInstaller creates an onedir application. Keep the complete `dist\IBKRTradingBo
 
 Some stop actions wait for broker cancellation status before submitting a replacement market SELL or finalizing the local state. Check the event log and TWS/Gateway. Avoid force-closing while a cancellation is unresolved unless continued operation is less safe.
 
+## The GUI is responsive, but price age or RTH appears frozen
+
+This indicates that the Qt interface may still be running while the controller worker has stopped delivering snapshots. v3.3.0 now treats the snapshot stream as a separate health signal:
+
+- after 3 seconds the GUI reports **Worker delayed**;
+- after 15 seconds it reports **Worker unresponsive**, invalidates cached connection/data/RTH indicators, and keeps increasing the displayed data age;
+- after 30 seconds it requests a full-process replacement, unless automatic restart is disabled or restart-loop protection is active;
+- a dead worker is handled immediately after startup grace.
+
+Check `debug_reports/worker_emergency.log`, `watchdog_restart_history.json`, and the audit bundle. A storage fault is shown separately and blocks all broker-changing actions. Automatic continuation occurs only when the one-time exact-cycle handoff and normal IBKR reconciliation both succeed; otherwise use the Reconciliation tab. `IBKR_BOT_AUTO_RESTART=0` disables replacement for diagnostic sessions.
+
 ## Collecting diagnostics
 
 For a reproducible report, include:

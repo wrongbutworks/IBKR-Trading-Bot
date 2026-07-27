@@ -26,7 +26,7 @@ Treat these as private unless they have been deliberately sanitized:
 - screenshots showing account identifiers, positions, executions, order references, local usernames, or paths;
 - `.env` files, private keys, certificates, and broker credentials.
 
-The application does not store TWS/IB Gateway passwords, but generated diagnostics can contain account and trading information. Review every attachment before sharing it.
+The application does not store TWS/IB Gateway passwords, but generated diagnostics can contain account and trading information. The watchdog's one-time replacement token is redacted from audit bundles and the raw handoff file is never copied, but `debug_reports/` should still be treated as private. Review every attachment before sharing it.
 
 ## Operational scope
 

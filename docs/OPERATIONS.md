@@ -171,6 +171,16 @@ On restoration:
 
 Native orders already accepted by IBKR are not cancelled merely because the connection is interrupted. They may continue at the broker. A BUY fill received only after recovery can delay application-side follow-up, including protective SELL placement, until broker reconciliation succeeds.
 
+### Worker watchdog and automatic process replacement
+
+The GUI expects controller snapshots every 0.5 seconds. It shows an amber delay after 3 seconds, a red unresponsive state after 15 seconds, and requests complete process replacement after 30 seconds without a snapshot. A dead worker is replaced after the startup grace period. During the stale interval, displayed market-data age continues to grow, RTH becomes unknown, cached green connection/data states are overridden, and broker-dependent controls are disabled.
+
+The replacement is not an extra worker. The current Qt event loop exits, controller shutdown is attempted, the portable-folder lock is released, and the same executable/source entry point replaces the process. The new process can automatically continue only the exact cycle proven active in the final healthy snapshot and only after normal broker reconciliation succeeds. Any mismatch leaves the app stopped for manual Reconciliation.
+
+SQLite failures remain fail-closed. No order placement/cancellation occurs while storage is unhealthy. A healthy worker waits for an independent successful database write probe before requesting replacement; a dead or hard-stalled worker is replaced directly. Diagnostics are written under `debug_reports/`. Three rapid replacements are permitted in 15 minutes, then retries use five-minute cooldowns. Set `IBKR_BOT_AUTO_RESTART=0` before launch to disable automatic replacement while retaining the warnings.
+
+Automatic process replacement cannot log into or restart TWS/IB Gateway, approve two-factor authentication, restart Windows, or recover a frozen Qt main thread. For unattended operation, Gateway/Windows login and external machine/process availability remain separate operational responsibilities.
+
 After any outage or restart:
 
 1. Inspect app-owned orders, fills, and positions directly in TWS/Gateway.

@@ -237,7 +237,17 @@ The screen shows whether the broker probe is **Not refreshed**, **Current**, **S
 
 **Reconcile and resume**, **Cancel visible app-owned orders**, **Sell app-bought unsold position**, and **Leave orders working** remain disabled until the probe is current; the same check is repeated when the button is clicked. **Stop after current cycle** is a local intent action and does not require a current broker probe. **Mark manually handled** remains an explicit manual override, but when the probe is not current its confirmation requires independent TWS verification. Audit export remains available.
 
-A configured BUY guard (including ATR warmup), an ordinary strategy wait, or a safe completed cycle is not treated as an actionable recovery fault. A stored active cycle does not resume automatically on startup. The operator must connect and explicitly start/resume monitoring. A sufficiently stale active cycle is put into recovery-required state. Broker-probe rows are point-in-time facts: a newer terminal poll for the same app order retires an older probe row so a completed cycle is not falsely presented as still working.
+A configured BUY guard (including ATR warmup), an ordinary strategy wait, or a safe completed cycle is not treated as an actionable recovery fault. On an ordinary launch, a stored active cycle does not resume automatically: the operator must connect and explicitly start/resume monitoring. A sufficiently stale active cycle is put into recovery-required state. Broker-probe rows are point-in-time facts: a newer terminal poll for the same app order retires an older probe row so a completed cycle is not falsely presented as still working.
+
+### Worker watchdog and unattended process restart
+
+The Qt GUI independently monitors delivery of the controller worker's normal 0.5-second snapshots. After 3 seconds without a new snapshot it reports **Worker delayed**; after 15 seconds it replaces cached green connection/data/RTH indications with an explicit unresponsive state; after 30 seconds it requests a full-process restart. If the worker thread has terminated, restart is requested immediately after a short startup grace period. The stale-data age continues to increase in the GUI and RTH becomes **Unknown** rather than remaining frozen at the last worker value.
+
+The restart path exits Qt, shuts down as far as possible, releases the portable-folder lock, and uses `os.execv` to replace the complete source or packaged process. It never starts a second controller thread or overlapping BouncyBot process. A one-time restart token authorizes only the immediate replacement process. Automatic strategy recovery is permitted only when the final healthy snapshot proved that monitoring was active and the exact persisted cycle ID, stage, contract identity, order references, and broker-relevant signature still match. The replacement then uses the existing IBKR connection and reconciliation path; any contract, order, fill, position, execution, recovery, or fresh-data uncertainty remains fail-closed for manual review. Ordinary manual launches still require an explicit Start.
+
+A SQLite failure activates a separate storage-fault state. All strategy work and broker-changing calls are blocked, error reporting falls back to `debug_reports/worker_emergency.log`, and a short independent write transaction probes whether the database is usable again. A healthy worker is replaced only after that write probe succeeds; a dead or hard-stalled worker is replaced even when the last snapshot reported a storage fault. Restart-loop protection permits three rapid attempts in 15 minutes and then waits five minutes between further attempts. Automatic replacement is enabled by default and can be disabled with `IBKR_BOT_AUTO_RESTART=0`.
+
+See [Worker watchdog and automatic recovery](docs/WORKER_WATCHDOG_AND_AUTO_RECOVERY.md) for exact gates, diagnostics, and limitations.
 
 ### Stop choices
 
@@ -273,6 +283,8 @@ This project is intentionally limited. It does not:
 - operate when the controlling application is closed except for native orders already accepted and held by IBKR;
 - guarantee that a fill, cancellation, or protective-order placement will be observed or acted on while the local API or Gateway-to-IBKR server connection is unavailable;
 - provide high-availability failover, redundant Internet connectivity, or a second controller process for the same cycle;
+- restart itself when the Qt main event loop, the complete process, Windows, storage device, or machine is frozen or unavailable; the built-in watchdog runs in the Qt GUI thread and can replace only a process whose GUI event loop is still executing;
+- automate TWS/IB Gateway login, credentials, two-factor approval, Gateway startup after a complete platform failure, or operating-system recovery;
 - reconstruct incomplete in-memory market-data captures after shutdown;
 - provide exchange-native historical ATR bars or persist ATR observations across restarts; ATR uses RTH prices observed by the current running application;
 - serve as investment advice, a hosted service, or a high-availability trading system.
@@ -531,6 +543,7 @@ Start with the [documentation index](docs/README.md). Current authoritative guid
 - [Risk controls](docs/RISK_CONTROLS.md)
 - [Operations](docs/OPERATIONS.md)
 - [Recovery and fail-safe behavior](docs/RECOVERY_AND_FAILSAFE.md)
+- [Worker watchdog and automatic recovery](docs/WORKER_WATCHDOG_AND_AUTO_RECOVERY.md)
 - [Database schema](docs/DATABASE_SCHEMA.md)
 - [Testing and simulation](docs/TESTING_AND_SIMULATION.md)
 - [Limitations](docs/LIMITATIONS.md)
@@ -542,7 +555,7 @@ Superseded release-specific documents are indexed under [docs/legacy](docs/legac
 
 ## Release history
 
-- [v3.3.0 release note](docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) — automatic/manual Fusion themes, non-overlapping About-logo layout, full-width Timeline tables, a scrollbar-contained Market capture tab, and a cleaner Windows release root with a launch shortcut.
+- [v3.3.0 release note](docs/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) — automatic/manual Fusion themes, corrected audit layouts, Windows packaging, fail-closed worker/storage supervision, and authenticated full-process automatic recovery.
 - [v3.2.2 release note](docs/legacy/V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) — richer price-monitor instrument identity, more compact Cycle Audit tables, BouncyBot application branding, and the **About > Info** screen.
 - [v3.2.1 release note](docs/legacy/V3_2_1_INCIDENT_GAP_CORRECTIONS.md) — LSE/LSEETF continuous-session timing, throttled repeated preflight audit warnings, and the distinct `PreflightBlocked` status.
 - [v3.2.0 release note](docs/legacy/V3_2_0_EUR_SMART_AND_RECONNECT.md) — exact USD/EUR ordinary-stock SMART contracts, one contract currency per portable database, contract capability/session checks, and fixed ten-second indefinite local reconnect.

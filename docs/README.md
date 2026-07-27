@@ -29,6 +29,7 @@ When documents disagree, use this source-of-truth order:
 | [`RISK_CONTROLS.md`](RISK_CONTROLS.md) | BUY blockers, exit behavior, and risk-control semantics |
 | [`OPERATIONS.md`](OPERATIONS.md) | Startup, monitoring, stopping, shutdown, and data-retention procedures |
 | [`RECOVERY_AND_FAILSAFE.md`](RECOVERY_AND_FAILSAFE.md) | Recovery model and operator actions after interruption or mismatch |
+| [`WORKER_WATCHDOG_AND_AUTO_RECOVERY.md`](WORKER_WATCHDOG_AND_AUTO_RECOVERY.md) | Worker/storage supervision, full-process replacement, exact-cycle auto-resume gates, and limits |
 | [`RECOVERY_AND_GUARDRAILS.md`](RECOVERY_AND_GUARDRAILS.md) | Technical invariants and fail-closed guard behavior |
 | [`DATABASE_SCHEMA.md`](DATABASE_SCHEMA.md) | SQLite tables, ownership, migrations, backups, and exports |
 | [`STRATEGY_FLOWCHART_TAB.md`](STRATEGY_FLOWCHART_TAB.md) | Meaning and limits of the GUI flowchart view |
@@ -49,7 +50,7 @@ When documents disagree, use this source-of-truth order:
 
 ## Current release note
 
-[`V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md`](V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) records automatic and View-menu-selectable Fusion themes, the non-overlapping About-logo layout, full-width Cycle Audit Timeline tables, the internally scrolling Market capture tab, the Windows release-root shortcut, runtime-only image packaging, compatibility, and verification scope.
+[`V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md`](V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) records automatic and View-menu-selectable Fusion themes, the corrected About/audit layouts, Windows packaging, fail-closed worker and storage supervision, authenticated full-process automatic recovery, compatibility, and verification scope. The detailed current watchdog contract is in [`WORKER_WATCHDOG_AND_AUTO_RECOVERY.md`](WORKER_WATCHDOG_AND_AUTO_RECOVERY.md).
 
 ## Archived documentation
 

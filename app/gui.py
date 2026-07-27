@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import re
 import time
 import zipfile
@@ -23,6 +24,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer
@@ -101,6 +103,17 @@ from .timeline_scaling import (
     time_window_from_values,
     timeline_path_time_window,
     true_time_axis_positions,
+)
+from .watchdog import (
+    WATCHDOG_AUTO_RESTART_SECONDS,
+    WATCHDOG_RESTART_EXIT_CODE,
+    WATCHDOG_UNRESPONSIVE_SECONDS,
+    WATCHDOG_WARNING_SECONDS,
+    append_emergency_log,
+    create_watchdog_restart_request,
+    discard_watchdog_restart_request,
+    record_watchdog_restart_attempt,
+    watchdog_restart_delay_seconds,
 )
 
 STAGE_LABELS = [
@@ -6044,6 +6057,18 @@ class MainWindow(QMainWindow):
         self._system_shutdown_in_progress = False
         self._last_system_shutdown_session_key = ""
         self._dark_mode = _dark_mode_enabled()
+        self._watchdog_started_monotonic = time.monotonic()
+        self._watchdog_last_snapshot_monotonic = 0.0
+        self._watchdog_last_snapshot_sequence = -1
+        self._watchdog_last_worker_snapshot: dict[str, Any] = {}
+        self._watchdog_restart_token = ""
+        self._watchdog_restart_requested = False
+        self._watchdog_deferred_restart_until = 0.0
+        self._watchdog_deferred_reason = ""
+        self._watchdog_state = "starting"
+        self._watchdog_shutdown_expected = False
+        auto_restart_value = str(os.environ.get("IBKR_BOT_AUTO_RESTART", "1") or "1").strip().lower()
+        self._watchdog_auto_restart_enabled = auto_restart_value not in {"0", "false", "no", "off"}
         self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.3.0")
         icon_path = resource_path("Images", "BouncyBot_app_icon.png")
         if icon_path.is_file():
@@ -6062,6 +6087,9 @@ class MainWindow(QMainWindow):
         self._history_filter_timer.setSingleShot(True)
         self._history_filter_timer.setInterval(200)
         self._history_filter_timer.timeout.connect(self._apply_history_filters)
+        self._worker_watchdog_timer = QTimer(self)
+        self._worker_watchdog_timer.setInterval(1000)
+        self._worker_watchdog_timer.timeout.connect(self._check_worker_watchdog)
         self._history_table_refresh_pending = False
         self._flowchart_history_refresh_pending = False
         self._history_columns_sized = False
@@ -6115,7 +6143,420 @@ class MainWindow(QMainWindow):
         self.controller.signals.connection_changed.connect(self._on_connection_changed)
         self.controller.signals.ticker_search_updated.connect(self._on_ticker_search_results)
         self.controller.start_thread()
+        self._worker_watchdog_timer.start()
         self.controller.refresh_history()
+
+    def _expect_controlled_shutdown(self) -> None:
+        self._watchdog_shutdown_expected = True
+        try:
+            self._worker_watchdog_timer.stop()
+        except Exception:
+            pass
+
+    def watchdog_restart_token(self) -> str:
+        """Return the one-time token only after this window requested restart."""
+        return str(self._watchdog_restart_token or "")
+
+    def _watchdog_base_dir(self) -> Path:
+        try:
+            return Path(self.controller.db_path).parent
+        except Exception:
+            return Path.cwd()
+
+    @staticmethod
+    def _watchdog_snapshot_age_seconds(
+        price_snapshot: dict[str, Any],
+        elapsed_since_snapshot: float,
+    ) -> Optional[float]:
+        timestamp = (
+            price_snapshot.get("api_last_data_received_at")
+            or price_snapshot.get("api_data_last_received_at")
+        )
+        parsed = _parse_timestamp(timestamp)
+        if parsed is not None:
+            return max(0.0, time.time() - parsed)
+        try:
+            prior = float(price_snapshot.get("api_data_age_seconds"))
+        except Exception:
+            return None
+        return max(0.0, prior + max(0.0, elapsed_since_snapshot))
+
+    def _watchdog_override_snapshot(
+        self,
+        source_snapshot: dict[str, Any],
+        *,
+        message: str,
+        elapsed_seconds: float,
+        state: str,
+    ) -> dict[str, Any]:
+        """Create a display-only fail-closed view without changing controller state."""
+        snapshot = dict(source_snapshot or {})
+        snapshot["connected"] = False
+        snapshot["status"] = message
+        connectivity = dict(snapshot.get("broker_connectivity") or {})
+        connectivity.update(
+            {
+                "local_connected": False,
+                "upstream_connected": None,
+                "state": "worker_status_stale",
+                "message": message,
+                "trading_ready": False,
+                "awaiting_fresh_market_data": True,
+            }
+        )
+        snapshot["broker_connectivity"] = connectivity
+        snapshot["upstream_recovery_pending"] = True
+        if message.startswith("STORAGE FAULT AND WORKER"):
+            watchdog_summary = "Worker/storage fault"
+        elif message.startswith("STORAGE FAULT"):
+            watchdog_summary = "Storage fault"
+        else:
+            watchdog_summary = "Worker unresponsive" if state == "risk" else "Worker delayed"
+        snapshot["trading_status"] = {
+            "summary": watchdog_summary,
+            "state": state,
+            "tooltip": message,
+            "blockers": [
+                {
+                    "side": "BUY/SELL",
+                    "code": "worker_watchdog",
+                    "message": message,
+                    "short": "Worker watchdog",
+                }
+            ],
+        }
+
+        price_snapshot = dict(snapshot.get("price_snapshot") or {})
+        adjusted_age = self._watchdog_snapshot_age_seconds(
+            price_snapshot,
+            elapsed_seconds,
+        )
+        if adjusted_age is not None:
+            price_snapshot["api_data_age_seconds"] = adjusted_age
+            price_snapshot["api_data_last_received_age_seconds"] = adjusted_age
+        price_snapshot["strategy_price_usable"] = False
+        price_snapshot["api_data_state"] = "worker_stale"
+        price_snapshot["api_data_indicator_text"] = message
+        price_snapshot["api_data_invalidated"] = True
+        price_snapshot["api_data_invalidated_reason"] = message
+        price_snapshot["rth_open"] = None
+        price_snapshot["rth_message"] = (
+            "RTH status is unknown because the worker snapshot is stale."
+        )
+        rth_status = dict(price_snapshot.get("rth_status") or {})
+        rth_status.update(
+            {
+                "is_open": None,
+                "source": "worker_watchdog",
+                "message": price_snapshot["rth_message"],
+            }
+        )
+        price_snapshot["rth_status"] = rth_status
+        snapshot["price_snapshot"] = price_snapshot
+        snapshot["watchdog_override"] = {
+            "active": True,
+            "state": state,
+            "elapsed_seconds": max(0.0, elapsed_seconds),
+            "message": message,
+            "auto_restart_enabled": bool(self._watchdog_auto_restart_enabled),
+        }
+        return snapshot
+
+    def _render_watchdog_override(self, snapshot: dict[str, Any]) -> None:
+        """Render stale-worker facts without counting them as a worker snapshot."""
+        self.current_snapshot = snapshot
+        status_text = str(snapshot.get("status") or "")
+        if hasattr(self, "connection_status") and self.connection_status.text() != status_text:
+            self.connection_status.setText(status_text)
+        if hasattr(self, "live_status_bar"):
+            self.live_status_bar.update_data(snapshot)
+        self._update_command_bar_states(snapshot)
+        for button in getattr(self, "command_step_buttons", {}).values():
+            try:
+                button.setEnabled(False)
+            except Exception:
+                pass
+        for attribute in (
+            "recovery_refresh_broker_btn",
+            "recovery_resume_btn",
+            "recovery_stop_cycle_btn",
+            "recovery_cancel_app_order_btn",
+            "recovery_mark_manual_btn",
+            "recovery_sell_market_btn",
+            "recovery_leave_orders_btn",
+        ):
+            button = getattr(self, attribute, None)
+            if button is not None:
+                try:
+                    button.setEnabled(False)
+                    button.setToolTip(
+                        "Disabled because the controller worker is stale or unavailable. "
+                        "Audit export and application close remain available."
+                    )
+                except Exception:
+                    pass
+        dashboard_active = not hasattr(self, "tabs") or self.tabs.currentIndex() == 0
+        if dashboard_active and hasattr(self, "price_panel"):
+            self._update_price_feed(
+                snapshot.get("price_snapshot"),
+                snapshot.get("price_poll_interval_seconds"),
+            )
+
+    def _watchdog_restart_cooldown_text(self) -> str:
+        if not self._watchdog_auto_restart_enabled:
+            return " Automatic restart is disabled by IBKR_BOT_AUTO_RESTART."
+        try:
+            delay = watchdog_restart_delay_seconds(base_dir=self._watchdog_base_dir())
+        except Exception:
+            return " Automatic restart is blocked because restart-loop history cannot be read safely."
+        if delay <= 0:
+            return " Automatic full-process restart is armed."
+        return f" Restart-loop protection will retry in {max(1, int(math.ceil(delay)))} seconds."
+
+    def _request_watchdog_restart(self, reason: str) -> bool:
+        """Exit Qt with a one-time handoff so ``main`` can replace the process."""
+        if self._watchdog_restart_requested or not self._watchdog_auto_restart_enabled:
+            return False
+        now = time.monotonic()
+        try:
+            deferred_until = float(
+                getattr(self, "_watchdog_deferred_restart_until", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            deferred_until = 0.0
+        if deferred_until > now:
+            return False
+        base_dir = self._watchdog_base_dir()
+        try:
+            delay = watchdog_restart_delay_seconds(base_dir=base_dir)
+        except Exception as exc:
+            append_emergency_log(
+                "Could not read watchdog restart-loop history; automatic restart is blocked fail-closed.",
+                exc=exc,
+                base_dir=base_dir,
+            )
+            self._watchdog_deferred_restart_until = now + 60.0
+            self._watchdog_deferred_reason = "restart history unavailable"
+            return False
+        if delay > 0:
+            self._watchdog_deferred_restart_until = time.monotonic() + delay
+            self._watchdog_deferred_reason = str(reason or "worker watchdog")
+            return False
+
+        token = uuid4().hex
+        source_snapshot = dict(
+            self._watchdog_last_worker_snapshot
+            or self.current_snapshot
+            or {}
+        )
+        request_created = False
+        try:
+            create_watchdog_restart_request(
+                token,
+                source_snapshot,
+                str(reason or "worker watchdog requested a restart"),
+                base_dir=base_dir,
+            )
+            request_created = True
+            recorded = record_watchdog_restart_attempt(
+                base_dir=base_dir,
+                reason=str(reason or "worker watchdog requested a restart"),
+            )
+            if not recorded:
+                discard_watchdog_restart_request(token, base_dir=base_dir)
+                append_emergency_log(
+                    "Automatic restart was cancelled because restart-loop history could not be persisted.",
+                    context={"reason": reason},
+                    base_dir=base_dir,
+                )
+                self._watchdog_deferred_restart_until = now + 60.0
+                self._watchdog_deferred_reason = "restart history could not be persisted"
+                return False
+        except Exception as exc:
+            if request_created:
+                discard_watchdog_restart_request(token, base_dir=base_dir)
+            append_emergency_log(
+                "Could not create the watchdog replacement-process handoff.",
+                exc=exc,
+                context={"reason": reason},
+                base_dir=base_dir,
+            )
+            self._watchdog_deferred_restart_until = now + 60.0
+            self._watchdog_deferred_reason = "restart handoff could not be created"
+            return False
+
+        self._watchdog_restart_token = token
+        self._watchdog_restart_requested = True
+        append_emergency_log(
+            "GUI watchdog requested a full-process BouncyBot restart.",
+            context={
+                "reason": reason,
+                "exit_code": WATCHDOG_RESTART_EXIT_CODE,
+                "snapshot_sequence": self._watchdog_last_snapshot_sequence,
+            },
+            base_dir=base_dir,
+        )
+        try:
+            self._worker_watchdog_timer.stop()
+        except Exception:
+            pass
+        app = QApplication.instance()
+        exit_method = getattr(app, "exit", None) if app is not None else None
+        try:
+            if callable(exit_method):
+                exit_method(WATCHDOG_RESTART_EXIT_CODE)
+            else:
+                QApplication.exit(WATCHDOG_RESTART_EXIT_CODE)
+        except Exception as exc:
+            self._watchdog_restart_requested = False
+            discard_watchdog_restart_request(token, base_dir=base_dir)
+            try:
+                self._worker_watchdog_timer.start()
+            except Exception:
+                pass
+            append_emergency_log(
+                "Qt could not exit for the requested watchdog restart.",
+                exc=exc,
+                base_dir=base_dir,
+            )
+            return False
+        return True
+
+    def _check_worker_watchdog(self) -> None:
+        """Detect a dead or blocked worker from the independent Qt GUI thread."""
+        try:
+            if bool(getattr(self, "_watchdog_shutdown_expected", False)):
+                return
+            now = time.monotonic()
+            last_snapshot_at = self._watchdog_last_snapshot_monotonic
+            elapsed = max(
+                0.0,
+                now
+                - (
+                    last_snapshot_at
+                    if last_snapshot_at > 0
+                    else self._watchdog_started_monotonic
+                ),
+            )
+            alive_method = getattr(self.controller, "worker_is_alive", None)
+            worker_alive = bool(alive_method()) if callable(alive_method) else True
+            worker_snapshot = dict(
+                self._watchdog_last_worker_snapshot
+                or self.current_snapshot
+                or {}
+            )
+            storage_fault = dict(worker_snapshot.get("storage_fault") or {})
+            storage_fault_active = bool(storage_fault.get("active"))
+            startup_age = max(0.0, now - self._watchdog_started_monotonic)
+            worker_dead = not worker_alive and startup_age >= 1.0
+            worker_hard_stalled = elapsed >= WATCHDOG_AUTO_RESTART_SECONDS
+
+            if storage_fault_active:
+                try:
+                    fault_elapsed = max(
+                        float(storage_fault.get("elapsed_seconds") or 0.0),
+                        elapsed,
+                    )
+                except Exception:
+                    fault_elapsed = elapsed
+                operation = str(storage_fault.get("operation") or "SQLite operation")
+                detail = str(storage_fault.get("message") or "SQLite storage is unavailable")
+                if worker_dead or worker_hard_stalled:
+                    worker_detail = (
+                        "the worker thread stopped"
+                        if worker_dead
+                        else f"no controller snapshot arrived for {elapsed:.1f} seconds"
+                    )
+                    message = (
+                        f"STORAGE FAULT AND WORKER UNRESPONSIVE - trading monitoring is not running; "
+                        f"{worker_detail} ({operation}: {detail})."
+                        + self._watchdog_restart_cooldown_text()
+                    )
+                    self._watchdog_state = "storage_fault_unresponsive"
+                else:
+                    message = (
+                        f"STORAGE FAULT - trading is fail-closed ({operation}: {detail}). "
+                        "The worker is still supervised, but no broker action can be authorized."
+                        + self._watchdog_restart_cooldown_text()
+                    )
+                    self._watchdog_state = "storage_fault"
+                override = self._watchdog_override_snapshot(
+                    worker_snapshot,
+                    message=message,
+                    elapsed_seconds=elapsed,
+                    state="risk",
+                )
+                self._render_watchdog_override(override)
+                restart_ready = (
+                    bool(storage_fault.get("restart_recommended"))
+                    and fault_elapsed >= WATCHDOG_WARNING_SECONDS
+                )
+                if worker_dead or worker_hard_stalled:
+                    self._request_watchdog_restart(
+                        "worker stopped or became unresponsive while SQLite was unavailable; "
+                        f"full-process recovery is starting after {elapsed:.1f} seconds without a snapshot"
+                    )
+                elif restart_ready:
+                    self._request_watchdog_restart(
+                        "SQLite write access recovered after a storage fault; "
+                        f"full-process reconciliation is starting after {fault_elapsed:.1f} seconds"
+                    )
+                return
+
+            if worker_dead:
+                failure = str(
+                    (worker_snapshot.get("worker_health") or {}).get("failure_message")
+                    or "the worker thread is no longer alive"
+                )
+                message = (
+                    "WORKER STOPPED - trading monitoring is not running: "
+                    f"{failure}."
+                    + self._watchdog_restart_cooldown_text()
+                )
+                self._watchdog_state = "dead"
+                override = self._watchdog_override_snapshot(
+                    worker_snapshot,
+                    message=message,
+                    elapsed_seconds=elapsed,
+                    state="risk",
+                )
+                self._render_watchdog_override(override)
+                self._request_watchdog_restart("worker thread terminated unexpectedly")
+                return
+
+            if elapsed >= WATCHDOG_WARNING_SECONDS:
+                hard_stall = elapsed >= WATCHDOG_UNRESPONSIVE_SECONDS
+                state = "risk" if hard_stall else "waiting"
+                label = "WORKER UNRESPONSIVE" if hard_stall else "WORKER DELAYED"
+                message = (
+                    f"{label} - no controller snapshot for {elapsed:.1f} seconds. "
+                    "Connection, market-data and RTH indicators are stale; trading monitoring cannot be trusted."
+                )
+                if elapsed >= WATCHDOG_AUTO_RESTART_SECONDS:
+                    message += self._watchdog_restart_cooldown_text()
+                self._watchdog_state = "unresponsive" if hard_stall else "delayed"
+                override = self._watchdog_override_snapshot(
+                    worker_snapshot,
+                    message=message,
+                    elapsed_seconds=elapsed,
+                    state=state,
+                )
+                self._render_watchdog_override(override)
+                if elapsed >= WATCHDOG_AUTO_RESTART_SECONDS:
+                    self._request_watchdog_restart(
+                        f"worker emitted no snapshot for {elapsed:.1f} seconds"
+                    )
+                return
+
+            self._watchdog_state = "healthy"
+            self._watchdog_deferred_restart_until = 0.0
+            self._watchdog_deferred_reason = ""
+        except BaseException as exc:
+            append_emergency_log(
+                "GUI worker watchdog encountered an unexpected exception.",
+                exc=exc,
+                base_dir=self._watchdog_base_dir(),
+            )
 
     def _refresh_manual_input_lock_widget_registry(self) -> None:
         """Register configuration widgets disabled by the operator input lock.
@@ -8824,6 +9265,15 @@ class MainWindow(QMainWindow):
             self.connection_status.setText(status)
 
     def _on_snapshot(self, snapshot: dict[str, Any]) -> None:
+        received = time.monotonic()
+        self._watchdog_last_snapshot_monotonic = received
+        self._watchdog_last_worker_snapshot = dict(snapshot or {})
+        worker_health = snapshot.get("worker_health") or {}
+        try:
+            self._watchdog_last_snapshot_sequence = int(worker_health.get("snapshot_sequence", -1))
+        except Exception:
+            self._watchdog_last_snapshot_sequence = -1
+        self._watchdog_state = "healthy"
         self.current_snapshot = snapshot
         connection = snapshot.get("connection") or {}
         strategy = snapshot.get("strategy") or {}
@@ -10785,6 +11235,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 shutdown_is_active = True
             if shutdown_is_active:
+                self._expect_controlled_shutdown()
                 event.accept()
                 return
             # A prior Windows shutdown request was cancelled. Re-arm the normal
@@ -10801,6 +11252,7 @@ class MainWindow(QMainWindow):
                 )
                 event.ignore()
                 return
+            self._expect_controlled_shutdown()
             self.controller.shutdown()
             event.accept()
             return
@@ -10856,6 +11308,7 @@ class MainWindow(QMainWindow):
             )
             event.ignore()
             return
+        self._expect_controlled_shutdown()
         self.controller.shutdown()
         event.accept()
 

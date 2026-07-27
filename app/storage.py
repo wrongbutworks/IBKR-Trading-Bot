@@ -96,6 +96,39 @@ class BotStorage:
         con.execute("PRAGMA busy_timeout = 10000")
         return con
 
+    def probe_writable(self, timeout_seconds: float = 0.25) -> bool:
+        """Verify that SQLite can acquire a short-lived write transaction.
+
+        The worker uses this only after a storage fault.  A short independent
+        timeout avoids blocking broker callback pumping for the normal 10-second
+        connection timeout while still proving that a write lock is available.
+        No application row is inserted or modified.
+        """
+        timeout = max(0.05, float(timeout_seconds or 0.0))
+        con = sqlite3.connect(
+            self.db_path,
+            timeout=timeout,
+            factory=_ClosingSqliteConnection,
+        )
+        try:
+            con.execute(f"PRAGMA busy_timeout = {max(1, int(timeout * 1000))}")
+            con.execute("PRAGMA foreign_keys = ON")
+            con.execute("BEGIN IMMEDIATE")
+            # Exercise an actual main-database write, not only lock acquisition.
+            # The DDL and row insert are both rolled back, so no schema object or
+            # application row survives a successful probe.
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS __bouncybot_watchdog_write_probe "
+                "(probe_value INTEGER NOT NULL)"
+            )
+            con.execute(
+                "INSERT INTO __bouncybot_watchdog_write_probe(probe_value) VALUES (1)"
+            )
+            con.rollback()
+            return True
+        finally:
+            con.close()
+
     def _ensure_schema(self) -> None:
         """Create or migrate the SQLite schema in place.
 
@@ -2217,10 +2250,39 @@ class BotStorage:
                 # active DB file exists. The manifest records the failed backup.
                 zf.write(self.db_path, "database/bot_state_unvalidated.sqlite")
             debug_dir = self.debug_reports_dir()
-            for name in ["latest_state_report.txt", "audit_events_readable.log"]:
+            for name in [
+                "latest_state_report.txt",
+                "audit_events_readable.log",
+                "worker_emergency.log",
+                "watchdog_restart_history.json",
+            ]:
                 path = debug_dir / name
                 if path.exists():
                     zf.write(path, f"debug_reports/{name}")
+            restart_request = debug_dir / "watchdog_restart_request.json"
+            if restart_request.exists():
+                try:
+                    request_data = json.loads(
+                        restart_request.read_text(encoding="utf-8")
+                    )
+                    if isinstance(request_data, dict):
+                        request_data = dict(request_data)
+                        if "token" in request_data:
+                            request_data["token"] = "[redacted]"
+                        zf.writestr(
+                            "debug_reports/watchdog_restart_request_redacted.json",
+                            json.dumps(
+                                request_data,
+                                indent=2,
+                                sort_keys=True,
+                                default=self._json_default,
+                            ),
+                        )
+                except Exception:
+                    # A malformed handoff is itself recorded by the emergency
+                    # logger. Never copy the raw file because it contains the
+                    # one-time process-recovery token.
+                    pass
             with self.connect() as con:
                 for table in ["cycles", "orders", "executions", "events", "decision_events", "broker_events"]:
                     rows = con.execute(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT 2000").fetchall()

@@ -8,7 +8,9 @@ remain in the strategy and controller layers.
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtCore import Qt
@@ -23,7 +25,13 @@ from app.gui import (
     MainWindow,
 )
 from app.lockfile import SingleInstanceError, SingleInstanceLock
-from app.paths import resource_path
+from app.paths import app_dir, resource_path
+from app.watchdog import (
+    WATCHDOG_RESTART_EXIT_CODE,
+    append_emergency_log,
+    consume_watchdog_restart_request,
+    discard_watchdog_restart_request,
+)
 
 
 def _color_scheme_dark_state(scheme: Any) -> Optional[bool]:
@@ -138,8 +146,48 @@ def _install_session_shutdown_hook(app: QApplication, window: MainWindow) -> Non
         connect(window.handle_system_shutdown)
 
 
+WATCHDOG_RECOVERY_ARGUMENT = "--watchdog-recovery-token="
+
+
+def _split_watchdog_recovery_argument(argv: list[str]) -> tuple[list[str], str]:
+    """Remove the private restart token before Qt parses command-line options."""
+    cleaned: list[str] = []
+    token = ""
+    for index, argument in enumerate(list(argv or [])):
+        text = str(argument)
+        if index > 0 and text.startswith(WATCHDOG_RECOVERY_ARGUMENT):
+            candidate = text[len(WATCHDOG_RECOVERY_ARGUMENT) :].strip()
+            if candidate:
+                token = candidate
+            continue
+        cleaned.append(text)
+    if not cleaned:
+        cleaned = [str(Path(__file__).resolve())]
+    return cleaned, token
+
+
+def _watchdog_replacement_argv(token: str, qt_argv: list[str]) -> list[str]:
+    """Build argv for the same source or frozen application process."""
+    recovery_argument = f"{WATCHDOG_RECOVERY_ARGUMENT}{str(token or '').strip()}"
+    passthrough = list(qt_argv[1:]) if qt_argv else []
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *passthrough, recovery_argument]
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        *passthrough,
+        recovery_argument,
+    ]
+
+
+def _replace_with_watchdog_process(token: str, qt_argv: list[str]) -> None:
+    argv = _watchdog_replacement_argv(token, qt_argv)
+    os.execv(sys.executable, argv)
+
+
 def main() -> int:
-    app = QApplication(sys.argv)
+    qt_argv, incoming_watchdog_token = _split_watchdog_recovery_argument(list(sys.argv))
+    app = QApplication(qt_argv)
     _apply_application_palette(app)
     _apply_application_icon(app)
     lock = SingleInstanceLock()
@@ -148,14 +196,40 @@ def main() -> int:
     except SingleInstanceError as exc:
         QMessageBox.critical(None, "BouncyBot - IBKR Portable Trading Bot already running", str(exc))
         return 2
-    controller = None
+
+    restart_request: Optional[dict[str, Any]] = None
+    if incoming_watchdog_token:
+        restart_request = consume_watchdog_restart_request(
+            incoming_watchdog_token,
+            base_dir=app_dir(),
+        )
+        if restart_request is None:
+            append_emergency_log(
+                "Replacement process received an invalid or expired watchdog recovery token; starting fail-closed without auto-resume.",
+                context={"token_present": True},
+                base_dir=app_dir(),
+            )
+
+    controller: Optional[TradingController] = None
+    window: Optional[MainWindow] = None
+    exit_code = 0
+    restart_token = ""
     try:
         controller = TradingController()
+        # MainWindow starts the worker in its constructor. Queue the authenticated
+        # exact-cycle recovery command first so the worker can never observe a
+        # replacement-process startup without its one-time recovery gate.
+        if restart_request is not None:
+            controller.resume_after_watchdog_restart(restart_request)
         window = MainWindow(controller)
         _install_system_theme_hook(app, window)
         _install_session_shutdown_hook(app, window)
         window.show()
-        return app.exec()
+        exit_code = int(app.exec())
+        if exit_code == WATCHDOG_RESTART_EXIT_CODE:
+            token_getter = getattr(window, "watchdog_restart_token", None)
+            if callable(token_getter):
+                restart_token = str(token_getter() or "").strip()
     finally:
         try:
             if controller is not None:
@@ -163,10 +237,40 @@ def main() -> int:
                 if callable(shutdown):
                     try:
                         shutdown()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        append_emergency_log(
+                            "Controller shutdown raised while preparing process exit.",
+                            exc=exc,
+                            base_dir=app_dir(),
+                        )
         finally:
+            # The replacement process must acquire the same portable-folder
+            # lock. Release it before execv; never run two worker processes.
             lock.release()
+
+    if exit_code == WATCHDOG_RESTART_EXIT_CODE:
+        if not restart_token:
+            append_emergency_log(
+                "Qt exited with the watchdog restart code but no one-time token was available; refusing an unauthenticated auto-resume.",
+                base_dir=app_dir(),
+            )
+            return 3
+        try:
+            _replace_with_watchdog_process(restart_token, qt_argv)
+        except BaseException as exc:
+            discard_watchdog_restart_request(restart_token, base_dir=app_dir())
+            append_emergency_log(
+                "Could not replace the BouncyBot process after a watchdog exit.",
+                exc=exc,
+                context={
+                    "replacement_mode": "frozen" if getattr(sys, "frozen", False) else "source",
+                    "token_present": bool(restart_token),
+                },
+                base_dir=app_dir(),
+            )
+            return 4
+        return 0
+    return exit_code
 
 
 if __name__ == "__main__":

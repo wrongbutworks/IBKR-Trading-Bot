@@ -4,7 +4,7 @@ Recovery reconciles local application state with app-owned broker facts after st
 
 ## Core recovery principles
 
-1. **No automatic startup resumption.** A stored active cycle remains visible, but the operator must connect and explicitly Start/resume monitoring.
+1. **Ordinary startup remains manual.** A stored active cycle remains visible, but a normal launch requires the operator to connect and explicitly Start/resume monitoring. The only automatic exception is an authenticated immediate watchdog replacement of the same already-running supervision session, and that exception must pass the exact-cycle and normal broker-reconciliation gates described below.
 2. **App-owned orders only.** Broker order recovery requires a complete `OrderRef` already persisted by this installation; the shared `IBKRBOT|` prefix alone is not ownership proof.
 3. **Executions outrank assumptions.** A recent app-owned execution can update local fill state even when an expected callback was missed.
 4. **Unknown state fails closed.** The application enters recovery-required/manual-review rather than inventing an order or fill.
@@ -21,6 +21,38 @@ Recovery reconciles local application state with app-owned broker facts after st
 On launch, storage loads draft settings and any active cycle. A cycle whose `updated_at` is sufficiently old (current threshold: 12 hours) is marked stale and requires explicit reconciliation before normal monitoring can resume.
 
 The application does not place an order merely because SQLite says Stage 2 or Stage 4 was active. It waits for the operator to connect/start and then probes broker state.
+
+## Worker watchdog and replacement-process recovery
+
+The main Qt thread independently times delivery of controller snapshots. The default thresholds are:
+
+| Condition | Behavior |
+|---|---|
+| No snapshot for 3 seconds | Amber **Worker delayed** state; cached connection/data/RTH facts are treated as aging diagnostics. |
+| No snapshot for 15 seconds | Red **Worker unresponsive** state; broker-dependent controls are disabled, connection/data facts become unknown, RTH becomes unknown, and displayed quote age continues to increase. |
+| No snapshot for 30 seconds | Request a complete process replacement. |
+| Worker thread no longer alive | Request replacement immediately after a one-second startup grace period. |
+
+Replacement is process-level, not thread-level. Qt exits first, controller shutdown is attempted, the portable-folder single-instance lock is released, and `os.execv` replaces the current source or packaged process. BouncyBot never starts a second worker inside the wedged process and never intentionally overlaps two BouncyBot processes for the same portable folder.
+
+The GUI writes a short-lived one-time handoff outside SQLite and passes its random token only to the replacement process. The handoff can authorize automatic continuation only when all of these conditions hold:
+
+- the final delivered worker snapshot showed an active Stage 1, 2, 3, or 4 cycle already under monitoring;
+- neither startup-resume nor manual-recovery was already required before the incident;
+- the exact persisted cycle ID and stage still match;
+- the ticker, positive conId, stored app order references, and broker-relevant local cycle signature still match;
+- no different active SQLite cycle has replaced the expected target;
+- the existing connection, exact-contract qualification, app-owned order/execution/position reconciliation, and fresh-market-data gates succeed.
+
+The handoff never creates a new cycle and never recreates a missing order merely from local intent. A mismatch, changed persisted fact, failed broker probe, ambiguous position, unavailable recent execution, or missing fresh ticker event leaves the replacement in recovery-required/manual-review state. Ordinary user-launched startups have no watchdog token and therefore remain manual.
+
+Restart-loop history is also outside SQLite. Three rapid replacements are allowed within 15 minutes; further attempts wait five minutes between retries while the window remains populated. If the history file cannot be read or updated, automatic replacement is blocked fail-closed. Set `IBKR_BOT_AUTO_RESTART=0` to disable replacement while keeping watchdog display warnings.
+
+## SQLite storage-fault recovery
+
+A SQLite exception no longer relies on SQLite to report itself. The controller records a best-effort traceback in `debug_reports/worker_emergency.log`, marks storage unhealthy in memory, and blocks every strategy evaluation, order placement, order cancellation, replacement, and broker-state application that would require durable local state. The IBKR socket transport remains serviced and GUI health snapshots continue while the fault is supervised.
+
+A separate short-timeout SQLite connection periodically performs an actual `BEGIN IMMEDIATE`, table creation, and row insert inside a transaction that is always rolled back. This proves that the main database can accept a write without changing its schema or application rows. When the probe succeeds, trading remains blocked and the GUI requests a complete process replacement; the replacement then performs normal exact-cycle broker reconciliation before monitoring can resume. If the worker dies or stops producing snapshots during the storage fault, the hard worker watchdog takes precedence and replaces the process even without a successful probe, because the original process can no longer provide supervision.
 
 ## Reconnect behavior
 
@@ -174,7 +206,8 @@ Recovery support includes:
 - readable state/event reports;
 - broker/decision event tables;
 - completed pre/post-fill market-data capture ZIPs;
-- audit bundles with manifest and snapshot.
+- audit bundles with manifest and snapshot;
+- `worker_emergency.log`, restart-loop history, and a token-redacted watchdog handoff when present.
 
 A backup is local application evidence, not proof that a broker order did or did not execute.
 

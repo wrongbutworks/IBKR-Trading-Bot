@@ -67,7 +67,11 @@ Use separate accounts or deliberate operating procedures when strict position se
 - IBKR-native orders already accepted by the broker may continue to work after the application closes or loses connectivity; application-side Stage 1/3 observation does not.
 - A BUY can fill while callbacks are unavailable. Application-side follow-up, including protective SELL placement that did not already exist, is delayed until connectivity and reconciliation return.
 - Handling 1100/1101/1102 and retrying a lost local API connection every 10 seconds reduces stale-data and unattended-disconnect risk but does not provide redundant Internet, Gateway, machine, process, credential, or session failover.
-- Startup recovery is conservative and requires explicit operator action for a stored active cycle.
+- The built-in worker watchdog runs in the Qt GUI thread. It can detect a dead or blocked controller worker while the GUI event loop remains responsive and can replace that complete process. It cannot act when the Qt main event loop, entire process, Windows session, storage device, or machine is itself frozen or unavailable.
+- Automatic replacement is best-effort and local. It depends on the executable/source tree, portable directory, restart-history file, Python/Windows process creation, and database being usable enough for the replacement to start. A constructor/startup failure before the GUI watchdog starts has no in-process supervisor.
+- Automatic continuation is deliberately narrow: exact persisted cycle facts and normal IBKR reconciliation must succeed. The watchdog cannot guarantee continuity through missing broker history, changed manual orders/positions, corrupt storage, or a Gateway login/2FA failure.
+- Replacement attempts are rate-limited. After three rapid attempts in 15 minutes, the current fail-closed process waits five minutes between further attempts; persistent faults can therefore require operator intervention.
+- Ordinary startup recovery is conservative and requires explicit operator action for a stored active cycle. The only automatic exception is a short-lived authenticated watchdog replacement of an already monitored exact cycle, and it still uses the normal broker reconciliation gates.
 - Orderly Windows update/sign-out/shutdown requests receive a final resume checkpoint, but a sudden power cut, forced process kill, operating-system crash, or storage failure cannot execute that hook. Only state already committed to SQLite is recoverable in those cases.
 - Broker responses and recent execution windows may be incomplete; ambiguous states are moved to manual review rather than guessed. A cached recovery probe is only a point-in-time view. Newer normal order polls can supersede its matching rows, but any later explicit probe that still reports an order must be investigated.
 - The single-instance lock protects one portable folder. It cannot prevent a separately copied folder, different database, or different client ID from running elsewhere.
@@ -85,7 +89,7 @@ Use separate accounts or deliberate operating procedures when strict position se
 - Windows is the supported GUI and packaging target.
 - Python 3.11 or newer is required when running from source.
 - TWS or IB Gateway must be installed, logged in, authenticated, and configured for API access.
-- The application retries a lost local API socket every 10 seconds indefinitely, but it does not automate credentials, two-factor authentication, platform login, session restarts, or daily IBKR maintenance windows. Manual Disconnect and application shutdown stop the retries.
+- The application retries a lost local API socket every 10 seconds indefinitely, but it does not automate credentials, two-factor authentication, platform login, Gateway/TWS startup after a complete platform exit, operating-system restart/login, or daily IBKR maintenance windows. Manual Disconnect and application shutdown stop the retries.
 
 ## Security and distribution limits
 
