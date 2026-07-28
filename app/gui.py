@@ -148,7 +148,7 @@ CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€"}
 ACTIVE_CONTRACT_CURRENCY = "USD"
 CURRENCY_SYMBOL = CURRENCY_SYMBOLS[ACTIVE_CONTRACT_CURRENCY]
 
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 DARK_MODE_APP_PROPERTY = "bouncybotDarkMode"
 
 LIGHT_FUSION_PALETTE_COLORS = {
@@ -5944,7 +5944,7 @@ class CycleAuditDialog(QDialog):
             lines.extend([
                 "BUILT-IN EXAMPLE CYCLE",
                 "=" * 80,
-                "This is synthetic v3.3.0 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
+                "This is synthetic v3.4.0 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
                 "The scenario models a liquid U.S. stock pullback, a multi-execution trailing BUY fill, a temporary protective SELL, and a modest trailing-stop profit exit.",
                 "",
             ])
@@ -6069,7 +6069,7 @@ class MainWindow(QMainWindow):
         self._watchdog_shutdown_expected = False
         auto_restart_value = str(os.environ.get("IBKR_BOT_AUTO_RESTART", "1") or "1").strip().lower()
         self._watchdog_auto_restart_enabled = auto_restart_value not in {"0", "false", "no", "off"}
-        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.3.0")
+        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.4.0")
         icon_path = resource_path("Images", "BouncyBot_app_icon.png")
         if icon_path.is_file():
             self.setWindowIcon(QIcon(str(icon_path)))

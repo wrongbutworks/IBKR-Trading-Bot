@@ -1,4 +1,4 @@
-"""Automatic system light/dark appearance regressions for v3.3.0."""
+"""Automatic system light/dark appearance regressions for v3.4.0."""
 
 from __future__ import annotations
 
