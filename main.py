@@ -9,6 +9,7 @@ remain in the strategy and controller layers.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -30,6 +31,7 @@ from app.watchdog import (
     WATCHDOG_RESTART_EXIT_CODE,
     append_emergency_log,
     consume_watchdog_restart_request,
+    discard_expired_watchdog_restart_request,
     discard_watchdog_restart_request,
 )
 
@@ -182,6 +184,15 @@ def _watchdog_replacement_argv(token: str, qt_argv: list[str]) -> list[str]:
 
 def _replace_with_watchdog_process(token: str, qt_argv: list[str]) -> None:
     argv = _watchdog_replacement_argv(token, qt_argv)
+    if os.name == "nt":
+        # os.exec* on Windows joins argv with spaces and applies no quoting, so
+        # a portable folder path containing spaces would break the relaunch.
+        # Windows also cannot atomically replace a process image. Start the
+        # properly quoted replacement (subprocess applies MS quoting rules) and
+        # let this process finish its normal exit; the single-instance lock was
+        # already released by the caller.
+        subprocess.Popen(argv, close_fds=True)  # noqa: S603
+        return
     os.execv(sys.executable, argv)
 
 
@@ -209,6 +220,11 @@ def main() -> int:
                 context={"token_present": True},
                 base_dir=app_dir(),
             )
+    else:
+        # An ordinary tokenless launch cannot consume a handoff. Remove only an
+        # expired or malformed leftover request file; a fresh one is preserved
+        # for its token-holding replacement process.
+        discard_expired_watchdog_restart_request(base_dir=app_dir())
 
     controller: Optional[TradingController] = None
     window: Optional[MainWindow] = None
