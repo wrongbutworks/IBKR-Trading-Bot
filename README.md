@@ -4,7 +4,7 @@
   <img src="Images/BouncyBot_logo.png" alt="BouncyBot logo" width="640" />
 </p>
 
-**Current release: v3.4.0**
+**Current release: v3.6.0**
 
 ![Simple-view](Images/Trading-Simple-view.png)
 
@@ -116,7 +116,7 @@ The application records fills, commissions received from IBKR, gross and net P/L
 ## Core features
 
 - PySide6 desktop GUI with connection, strategy, flowchart, history, and reconciliation views.
-- Automatic operating-system light/dark appearance at startup, including live theme changes, neutral Qt Fusion-style dark colors, explicit **View > Light mode / Dark mode** switching, and theme-aware custom-painted audit/strategy visualizations.
+- Light Fusion appearance at every startup, neutral Qt Fusion-style dark colors available through **View > Dark mode**, explicit **View > Light mode** switching, and theme-aware custom-painted audit/strategy visualizations.
 - TWS and IB Gateway connection profiles for live and paper endpoints, with a fixed ten-second local API reconnect cadence that continues indefinitely until reconnection, manual Disconnect, or shutdown.
 - Exact USD/EUR ordinary-stock contract selection through the IBKR API, with SMART routing, positive `conId` verification, route-specific market-rule price increments, order-capability checks, and one contract currency per portable database.
 - Whole-share budget sizing.
@@ -395,7 +395,7 @@ The selected connection profile defines paper versus live mode. Live mode adds e
 
 ### About and project information
 
-Use **About > Info** to view the fully centered BouncyBot logo, current application version, the project GitHub link, the IBKR referral link, and the same copyable support addresses listed in the [Thank me](#thank-me) section. The app follows the current Windows light or dark color scheme automatically; no application theme setting is required.
+Use **About > Info** to view the fully centered BouncyBot logo, current application version, the project GitHub link, the IBKR referral link, and the same copyable support addresses listed in the [Thank me](#thank-me) section. The app always starts with the light Fusion appearance. Use **View > Light mode** or **View > Dark mode** to change the appearance for the current session.
 
 ## Data, backups, and diagnostics
 
@@ -472,7 +472,7 @@ dist\IBKRTradingBot\IBKRTradingBot.exe
 and creates the versioned release folder and final ZIP using the same naming pattern as IBKR Market Replay Lab:
 
 ```text
-release\IBKRTradingBot_3.4.0_Windows\
+release\IBKRTradingBot_3.6.0_Windows\
   BouncyBot.lnk
   GUI\IBKRTradingBot.exe
   docs\
@@ -482,7 +482,7 @@ release\IBKRTradingBot_3.4.0_Windows\
   SECURITY.md
   QUICK_START.txt
 
-release\IBKRTradingBot_3.4.0_Windows.zip
+release\IBKRTradingBot_3.6.0_Windows.zip
 release\SHA256SUMS.txt
 ```
 
@@ -555,7 +555,9 @@ Superseded release-specific documents are indexed under [docs/legacy](docs/legac
 
 ## Release history
 
-- [v3.4.0 release note](docs/V3_4_0_RELIABILITY_AND_RECOVERY_FIXES.md) — exact protective-SELL completion gates, quoted Windows watchdog replacement, bounded capture shutdown, deterministic recovery state, and lockfile hardening.
+- [v3.6.0 release note](docs/V3_6_0_SELL_RECONCILIATION_AND_HISTORY_ROBUSTNESS.md) — exact aggregate final-SELL settlement, fail-closed quantity mismatches, numeric Trade History sorting, and operator-visible audit/export failures.
+- [v3.5.0 release note](docs/legacy/V3_5_0_GUI_LIGHT_MODE_AND_LAYOUT.md) — price-monitor-first Advanced layout, light-mode startup, and reliable workflow-button state after theme switching.
+- [v3.4.0 release note](docs/legacy/V3_4_0_RELIABILITY_AND_RECOVERY_FIXES.md) — exact protective-SELL completion gates, quoted Windows watchdog replacement, bounded capture shutdown, deterministic recovery state, and lockfile hardening.
 - [v3.3.0 release note](docs/legacy/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) — automatic/manual Fusion themes, corrected audit layouts, Windows packaging, fail-closed worker/storage supervision, and authenticated full-process automatic recovery.
 - [v3.2.2 release note](docs/legacy/V3_2_2_GUI_INFORMATION_AND_AUDIT_LAYOUT.md) — richer price-monitor instrument identity, more compact Cycle Audit tables, BouncyBot application branding, and the **About > Info** screen.
 - [v3.2.1 release note](docs/legacy/V3_2_1_INCIDENT_GAP_CORRECTIONS.md) — LSE/LSEETF continuous-session timing, throttled repeated preflight audit warnings, and the distinct `PreflightBlocked` status.

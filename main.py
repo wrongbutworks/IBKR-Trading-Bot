@@ -1,7 +1,7 @@
 """Windows GUI entry point and process-level safety setup.
 
-The entry point creates the Qt application, follows the operating-system color
-scheme, acquires the portable-folder single-instance lock, constructs the
+The entry point creates the Qt application in light mode, acquires the
+portable-folder single-instance lock, constructs the
 controller/window, and releases process resources on shutdown. Trading decisions
 remain in the strategy and controller layers.
 """
@@ -80,8 +80,8 @@ def _system_prefers_dark(app: QApplication) -> bool:
     return False
 
 
-def _apply_application_palette(app: QApplication, dark: Optional[bool] = None) -> bool:
-    """Apply the Fusion palette for the detected light or dark system theme."""
+def _apply_application_palette(app: QApplication, dark: Optional[bool] = False) -> bool:
+    """Apply a Fusion palette; startup defaults to light unless explicitly overridden."""
     dark = _system_prefers_dark(app) if dark is None else bool(dark)
     app.setStyle(QStyleFactory.create("Fusion"))
     palette = QPalette()
@@ -199,6 +199,8 @@ def _replace_with_watchdog_process(token: str, qt_argv: list[str]) -> None:
 def main() -> int:
     qt_argv, incoming_watchdog_token = _split_watchdog_recovery_argument(list(sys.argv))
     app = QApplication(qt_argv)
+    # Start every session in the validated light appearance. Dark mode remains
+    # available as an explicit runtime choice under View.
     _apply_application_palette(app)
     _apply_application_icon(app)
     lock = SingleInstanceLock()
@@ -238,7 +240,6 @@ def main() -> int:
         if restart_request is not None:
             controller.resume_after_watchdog_restart(restart_request)
         window = MainWindow(controller)
-        _install_system_theme_hook(app, window)
         _install_session_shutdown_hook(app, window)
         window.show()
         exit_code = int(app.exec())
