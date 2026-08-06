@@ -1,129 +1,119 @@
-BouncyBot - IBKR Portable Trading Bot v3.6.0
-SELL reconciliation and Trade History robustness report
-Release date: 2026-07-29
+BouncyBot v3.8.0 - BUY Partial-Fill Grace and Safety Cancellation
+Implementation and Test Report
+Date: 2026-08-05
 
-LINEAGE AND REVIEW
-==================
+1. Release basis
 
-This release is based on the final v3.5.0 source archive. The submitted local
-v3.5.0 source and patch were compared with that baseline, reviewed, integrated,
-and advanced to v3.6.0.
+This corrective release was implemented on top of the finalized BouncyBot v3.7.0
+market-data and Stage-3 SELL-safety source tree. The release advances the project
+to v3.8.0 and changes only the Stage-2 treatment of a positive partial BUY fill,
+plus the corresponding documentation, simulation expectations, regression tests,
+and release metadata.
 
-The submitted changes added fail-closed final/protective SELL quantity gates,
-numeric sorting for formatted Trade History columns, and operator-visible GUI
-errors for audit reads and history exports. Review identified and corrected
-related edge cases around cancel-and-replace exit aggregation, a still-working
-partially filled SELL, missing persisted execution proof, missing aggregate fill
-price, and non-finite numeric sort values.
+No SQLite table, column, index, migration, or new persisted setting was added.
+Existing v3.7.0 databases and active-cycle state remain compatible.
 
-IMPLEMENTED CHANGES
-===================
+2. Implemented behavior
 
-1. Exact aggregate final-SELL settlement
+- The first positive fill of a triggered native BUY TRAIL order or zero-trail MKT
+  BUY no longer causes an immediate cancellation request.
+- A fixed 3.0-second completion grace begins at the first persisted positive fill.
+- Additional partial fills do not restart the grace clock.
+- A full terminal fill during the grace settles normally without cancellation.
+- If the order remains nonterminal after the grace, BouncyBot requests one
+  cancellation of the still-working remainder.
+- The original BUY remains in Stage 2 until IBKR reports a terminal order state.
+- Every fill and commission received before or during the cancellation race is
+  reconciled before Stage 3 begins.
+- The existing buy_filled_at timestamp provides restart-safe timeout continuity.
+  Missing, malformed, or future timestamps start a new bounded grace instead of
+  leaving the remainder active indefinitely.
+- The existing buy_remainder_cancel_requested flag prevents duplicate confirmed
+  requests. A broker-call failure leaves the flag clear so a later poll can retry.
 
-- A cycle completes only when persisted cycle SELL executions exactly equal the
-  app-owned BUY-filled quantity, no broker remainder is still working, and an
-  aggregate fill price is available.
-- Nonterminal partial fills are persisted and remain under supervision.
-- Terminal partials enter Stage.ERROR with SELL_PARTIAL_TERMINAL.
-- Underfills, overfills, contradictory remainders, missing execution proof, and
-  missing aggregate fill prices enter Stage.ERROR with SELL_QUANTITY_MISMATCH.
-- Cancel-and-replace and manual-close remainder orders are validated against all
-  app-owned SELL executions for the cycle. Weighted aggregate price, commission,
-  and final P/L therefore include both the earlier partial and replacement fill.
-- A partially filled order remains working until its broker status is terminal,
-  so manual market close cancels and confirms the existing remainder before a
-  replacement can be submitted.
+The grace is bypassed when an enabled market/session safety control becomes
+unsafe or cannot be verified:
 
-2. Protective-SELL terminal consistency
+- RTH closure for an RTH-only cycle;
+- loss of required live-data mode;
+- stale or invalidated market-data/RTH evidence;
+- unavailable session boundaries or the configured pre-close BUY cutoff;
+- the configured recent-volatility ceiling;
+- the configured minimum trade price;
+- the configured maximum gap from the previous close; and
+- an unavailable, crossed, or excessive bid/ask spread.
 
-- A terminal protective SELL that reports the full app-owned filled quantity and
-  a positive remainder is treated as an unprovable quantity mismatch. It cannot
-  remain in an endless polling state or be interpreted as exact closure.
-- The existing v3.4.0 exact-quantity, terminal-partial, recovery, and fail-closed
-  protective-SELL gates remain in force.
+Portfolio budgets, daily-loss limits, cycle counts, and what-if checks are not
+rerun after a fill because they govern submission of a new BUY rather than the
+ownership of shares that have already executed.
 
-3. Trade History and audit GUI robustness
+3. Audit behavior
 
-- Formatted currency, percentage, and quantity cells sort by their raw finite
-  numeric values instead of lexical display text.
-- Blank, invalid, NaN, and infinite values group deterministically below finite
-  values.
-- Audit-detail read failures and Trade History export failures are shown in an
-  operator dialog. A failed export does not display a success message, and a
-  failed audit read does not open a partially initialized dialog.
+- BUY_PARTIAL_FILL records the cumulative quantity and the grace decision facts.
+- BUY_REMAINDER_CANCEL_REQUESTED records a confirmed cancellation request with
+  timeout or safety as the decision result and a structured reason code.
+- Late fills after a cancellation request continue to use execution-id
+  idempotence and cumulative reconciliation.
 
-SAFETY AND COMPATIBILITY
-========================
+4. Regression coverage
 
-- Ambiguous SELL facts fail closed for manual reconciliation instead of
-  completing a cycle without exact broker/local proof.
-- Entry logic, ATR calculations, strategy percentages, BUY construction,
-  position sizing, normal SELL order construction, market-data selection, quote
-  freshness, RTH/session behavior, complete-OrderRef ownership, watchdog
-  restart, and account/contract scope are unchanged.
-- v3.6.0 adds no SQLite table, column, index, migration, or persisted setting.
-- Existing v3.5.0 databases, active cycles, execution rows, checkpoints,
-  watchdog files, captures, backups, and portable folders remain compatible.
+A new focused module, tests/test_v380_buy_partial_fill_grace.py, covers:
 
-FINAL VERIFICATION
-==================
+- native TRAIL and zero-trail MKT BUY orders;
+- no cancellation on the first partial;
+- full completion inside the grace;
+- timeout cancellation;
+- later partials not resetting the first-fill time;
+- persistence/reload of the first-fill timestamp;
+- full fills arriving during the cancellation race;
+- RTH, live-data, stale-data, session, volatility, minimum-price, gap, and spread
+  safety cancellation;
+- unavailable/crossed quote evidence;
+- duplicate suppression;
+- future-clock recovery; and
+- broker-terminal partial settlement.
 
-Repository tests
-----------------
+Existing incident and reconciliation tests were updated so the historical NBIS
+multi-print BUY can complete normally during the grace while timeout and failed-
+cancellation paths remain explicitly exercised.
 
-- 1,140/1,140 collected pytest cases passed across all 122 test modules.
-- Each module was executed in a fresh pytest process in the Linux headless
-  environment to isolate Qt-stub module state; the aggregate contained no
-  failed, skipped, or xfailed case.
-- ResourceWarning was promoted to an error in every test process.
-- The run included the accelerated-soak tests and the elapsed-time-bound
-  large-database performance tests.
-- 16 focused v3.6.0 regressions cover the submitted changes and review findings.
+5. Validation results
 
-Coverage and deterministic verification
----------------------------------------
+Final source validation:
 
-- 78.0% combined statement/branch coverage for app/ and main.py; required gate:
-  75.0%.
-- 996/996 executable application callables were entered.
+- 1,178/1,178 collected pytest cases passed in the complete suite with
+  ResourceWarning promoted to an error.
+- All 124 test modules also passed when executed independently in fresh Python
+  processes; the module-isolated aggregate was again 1,178 passing cases with no
+  failed, skipped, xfailed, or xpassed case.
+- The cleanly extracted release ZIP passed 109/109 focused current-release,
+  compatibility, and release-metadata tests.
+- 23 direct v3.8.0 partial-fill-grace regression cases passed.
+- 78.1% combined statement/branch coverage was measured on the finalized
+  application code.
+- 1,011/1,011 executable application callables were entered by the coverage gate.
 - 17/17 targeted safety mutants were killed.
-- 58/58 deterministic simulation contracts passed across 54 CSV price-path
-  files.
+- 58/58 deterministic simulation contracts passed across 54 CSV price paths.
+- Python compileall passed for app, tests, scripts, and main.py.
+- git diff --check passed.
+- All 22 source image assets remain present.
 
-Supplemental verification
--------------------------
+6. Tooling limitations
 
-- Python compileall passed for app/, tests/, scripts/, and main.py.
-- Git whitespace validation passed.
-- Release metadata, current/archived documentation placement, schema
-  compatibility statements, and focused release tests passed.
-- The source archive is assembled only from committed repository files beneath
-  one IBKR-Trading-Bot-main/ root. It contains exactly 353 tracked files,
-  including all 22 source image assets, and excludes Git metadata, virtual
-  environments, caches, bytecode, coverage output, logs, databases, watchdog
-  handoffs, captures, backups, exports, and build output.
-- ZIP integrity and extracted-file byte comparison passed. The extracted source
-  independently collected all 1,140 tests and passed the 81 focused release,
-  compatibility, documentation, and GUI tests.
-- The v3.6.0 upgrade patch applies cleanly to the exact v3.5.0 baseline; the
-  patched 353-file tree is byte-identical to the released source tree.
-- Ruff and Pyright were not installed in the offline Linux environment and are
-  therefore not recorded as passing. The configured Pyright application scope
-  (app/models.py, app/strategy.py, and app/storage.py) is unchanged by the
-  runtime implementation. The Windows run_all_tests.bat workflow remains the
-  authoritative Ruff/Pyright gate.
+Ruff and Pyright were not available in the offline Linux release environment.
+An installation attempt could not reach the package index, so neither tool is
+recorded as passing here. The final Windows run_all_tests.bat quality gate must
+still run Ruff and Pyright before producing a native executable.
 
-PLATFORM-SPECIFIC BOUNDARY
-==========================
+A native Windows/PyInstaller executable was not built in this environment.
+Windows smoke testing should confirm the packaged v3.8.0 executable, IB Gateway
+connection, a normal multi-print BUY that completes inside three seconds, timeout
+cancellation of a still-working remainder, and cancellation-race reconciliation.
 
-A native Windows/PyInstaller executable was not built in this Linux environment.
-The existing Windows build and portable-release scripts were versioned to
-v3.6.0 but still require a native Windows smoke test. Recommended checks are:
+7. Unattended-operation boundary
 
-- run the complete Windows pytest/Ruff/Pyright gate;
-- build and launch the onedir executable from a path containing spaces;
-- verify numeric ascending/descending Trade History sorting;
-- verify audit/export error dialogs with a locked/read-only test folder;
-- paper-test partial final/protective SELL reconciliation and manual close;
-- confirm the Windows shortcut and versioned release-folder names.
+This release deliberately reuses the existing single worker, persisted cycle,
+order-polling, cancellation, and reconciliation architecture. It does not add a
+new worker thread, database schema, broker order type, or automatic replacement
+order. A cancellation request cannot undo filled shares and cannot guarantee that
+the remaining shares will not fill before IBKR acknowledges the request.

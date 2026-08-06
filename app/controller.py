@@ -23,6 +23,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
+from copy import copy
 from dataclasses import asdict
 from datetime import datetime, timezone
 from math import ceil, floor, isfinite
@@ -150,6 +151,11 @@ class TradingController:
     RECONNECT_INTERVAL_SECONDS = 10.0
     BUY_PREFLIGHT_AUDIT_THROTTLE_SECONDS = 60.0
     STORAGE_FAULT_PROBE_INTERVAL_SECONDS = 2.0
+    STAGE3_SELL_CONFIRMATIONS_REQUIRED = 2
+    # A positive partial fill proves that a native TRAIL BUY has triggered, or
+    # that a zero-trail MKT BUY is executing. Allow normal multi-print marketable
+    # execution a brief chance to finish before cancelling the working remainder.
+    BUY_PARTIAL_FILL_GRACE_SECONDS = 3.0
 
     # Zero means do not add a second rate limit inside the strategy cadence when
     # reading the cached TWS subscription handle. The adapter stamps actual
@@ -223,6 +229,7 @@ class TradingController:
         self._api_data_invalidated = True
         self._api_data_invalidated_reason = "Waiting for the first fresh market-data update."
         self._api_data_invalidated_at = utc_now_iso()
+        self._stage3_sell_confirmation: dict[str, Any] = {}
 
         self._broker_connectivity: dict[str, Any] = {
             "local_connected": False,
@@ -2066,6 +2073,7 @@ class TradingController:
         self._api_data_invalidated = True
         self._api_data_invalidated_reason = str(reason or "Market-data freshness was invalidated.")
         self._api_data_invalidated_at = utc_now_iso()
+        self._stage3_sell_confirmation.clear()
         # Keep the last consumed event token. Clearing it here would let another
         # read of the same cached event sequence masquerade as the first fresh
         # update after invalidation. A genuine update changes the sequence, and a
@@ -3760,6 +3768,7 @@ class TradingController:
         self._api_data_invalidated = True
         self._api_data_invalidated_reason = "Waiting for the first fresh market-data update after reconnect."
         self._api_data_invalidated_at = utc_now_iso()
+        self._stage3_sell_confirmation.clear()
 
     def _refresh_confirmed_market_data_if_due(
         self,
@@ -4487,6 +4496,8 @@ class TradingController:
             self._refresh_confirmed_market_data_if_due(timeout=read_timeout)
             return
         cycle = self.active_cycle
+        if cycle.stage != Stage.WAIT_RISE_TRIGGER:
+            self._reset_stage3_sell_confirmation()
         if cycle.stage in {Stage.ERROR, Stage.MANUAL_REVIEW, Stage.STOPPED, Stage.IDLE}:
             self._refresh_confirmed_market_data_if_due(timeout=read_timeout)
             return
@@ -4497,6 +4508,38 @@ class TradingController:
 
         fetched_price, last_price = self._poll_price_if_due(cycle, timeout=read_timeout)
         cycle = self.active_cycle or cycle
+        snapshot = self.price_snapshot or {}
+        stage3_tracked_event = bool(
+            cycle.stage == Stage.WAIT_RISE_TRIGGER
+            and snapshot.get("market_data_field_tracking")
+            and snapshot.get("api_data_received_in_latest_read")
+        )
+        stage3_current_quote: Optional[dict[str, Any]] = None
+        if stage3_tracked_event:
+            # The generic selected price can be intentionally unusable when
+            # marketPrice falls back to an unchanged Last. Stage 3 nevertheless
+            # needs to inspect this actual quote event so it can validate or
+            # reset the consecutive bid confirmations.
+            stage3_current_quote, _ = self._stage3_sell_quote_evidence(
+                cycle,
+                require_latest_event=True,
+                require_trigger=False,
+            )
+            current_bid = (
+                self._positive_float(stage3_current_quote.get("bid"))
+                if stage3_current_quote is not None
+                else None
+            )
+            if current_bid is not None:
+                fetched_price = True
+                last_price = current_bid
+            elif not fetched_price:
+                # _advance_waiting_cycle_from_price reads the field-tracked
+                # snapshot directly and will fail closed. Supply only an
+                # existing actionable cycle price so the invalid quote can be
+                # audited without promoting the stale selected fallback.
+                last_price = self._positive_float(cycle.last_price)
+                fetched_price = last_price is not None
 
         if cycle.stage in {Stage.WAIT_INITIAL_DROP, Stage.WAIT_RISE_TRIGGER}:
             if cycle.stage == Stage.WAIT_RISE_TRIGGER and cycle.protective_sell_order_ref:
@@ -4523,6 +4566,14 @@ class TradingController:
                     )
                     return
             if not fetched_price:
+                # A newly consumed event that cannot supply an actionable
+                # strategy price (for example CHIP's unchanged cached Last
+                # fallback after one quote side disappeared) breaks the
+                # consecutive Stage-3 confirmation sequence. Cached reads
+                # without a new event do not reset an otherwise valid first
+                # confirmation.
+                if stage3_tracked_event:
+                    self._reset_stage3_sell_confirmation(cycle.id)
                 return
             if last_price is None:
                 self._log_price_warning_throttled(
@@ -4530,11 +4581,21 @@ class TradingController:
                     "Waiting for a fresh market-data event. Cached TWS/API fields cannot advance the strategy.",
                 )
                 return
-            if cycle.stage == Stage.WAIT_RISE_TRIGGER and self._liquidate_profitable_stage3_before_close_if_needed(
-                cycle,
-                last_price,
-            ):
-                return
+            if cycle.stage == Stage.WAIT_RISE_TRIGGER:
+                # For field-tracked Stage 3, close-before-RTH may use only a
+                # fresh complete spread-checked quote. An invalid quote still
+                # reaches the normal Stage-3 guard below so confirmations reset,
+                # but it cannot trigger a market liquidation from an old price.
+                close_reference = (
+                    self._positive_float(stage3_current_quote.get("bid"))
+                    if stage3_tracked_event and stage3_current_quote is not None
+                    else (None if stage3_tracked_event else last_price)
+                )
+                if close_reference is not None and self._liquidate_profitable_stage3_before_close_if_needed(
+                    cycle,
+                    close_reference,
+                ):
+                    return
             rth_status = self._update_rth_status(self.contract)
             is_rth = bool(rth_status.get("is_open", True))
             message = str(rth_status.get("message") or rth_status.get("source") or "")
@@ -4918,6 +4979,19 @@ class TradingController:
         data["api_data_invalidated_reason"] = self._api_data_invalidated_reason
         data["api_data_invalidated_at"] = self._api_data_invalidated_at
 
+        field_tracking = bool(data.get("market_data_field_tracking"))
+        basis_updated_value = data.get("selected_price_basis_updated_in_event")
+        if basis_updated_value is None:
+            # Compatibility with field-tracked snapshots created before the
+            # update/change split: a recorded change was also an update.
+            basis_updated_value = data.get("selected_price_basis_changed_in_update")
+        selected_basis_updated = bool(basis_updated_value) if field_tracking else True
+        selected_basis = str(data.get("selected_price_basis") or data.get("source") or "unknown")
+        data["selected_price_basis_event_fresh"] = bool(actual_update and selected_basis_updated)
+        data["selected_price_cached_in_fresh_event"] = bool(
+            actual_update and field_tracking and not selected_basis_updated
+        )
+
         freshness_limit = max(0.1, float(getattr(self.strategy, "max_selected_price_age_seconds", 3.0) or 3.0))
         if snapshot_upstream is False:
             data["api_data_state"] = "upstream_disconnected"
@@ -4926,8 +5000,14 @@ class TradingController:
             data["api_data_state"] = "invalidated"
             data["api_data_indicator_text"] = self._api_data_invalidated_reason or "WAITING FOR A FRESH MARKET-DATA UPDATE"
         elif actual_update:
-            data["api_data_state"] = "receiving"
-            data["api_data_indicator_text"] = f"FRESH API UPDATE - {len(non_null_fields)} raw fields"
+            if field_tracking and not selected_basis_updated:
+                data["api_data_state"] = "selected_field_unchanged"
+                data["api_data_indicator_text"] = (
+                    f"FRESH API EVENT - selected {selected_basis} field did not update; strategy price is paused"
+                )
+            else:
+                data["api_data_state"] = "receiving"
+                data["api_data_indicator_text"] = f"FRESH API UPDATE - {len(non_null_fields)} raw fields"
         elif data_age is not None and data_age > freshness_limit:
             data["api_data_state"] = "stale"
             data["api_data_indicator_text"] = f"API DATA STALE - last actual update {data_age:.1f}s ago"
@@ -4945,7 +5025,18 @@ class TradingController:
             selected_price = float(data.get("price") or 0.0)
         except Exception:
             selected_price = 0.0
-        data["strategy_price_usable"] = bool(actual_update and upstream_ready and selected_price > 0)
+        data["strategy_price_usable"] = bool(
+            actual_update
+            and upstream_ready
+            and selected_price > 0
+            and selected_basis_updated
+        )
+        if actual_update and field_tracking and not selected_basis_updated:
+            data["strategy_price_block_reason"] = (
+                f"The selected {selected_basis} price came from a field that did not update in this market-data event."
+            )
+        else:
+            data["strategy_price_block_reason"] = ""
 
         if contract is not None:
             raw = contract.raw
@@ -5392,6 +5483,294 @@ class TradingController:
             return f"Volatility guard blocked BUY: recent {window}s price range {move:.2f}% exceeds max {max_move:.2f}%."
         return None
 
+    def _buy_partial_fill_elapsed_seconds(
+        self,
+        cycle: CycleState,
+        *,
+        now_utc: Optional[datetime] = None,
+    ) -> float:
+        """Return elapsed time since the first positive BUY fill.
+
+        ``buy_filled_at`` already survives reconnects, watchdog replacement,
+        and application restarts. Reusing it keeps the timeout deterministic
+        without adding another database column. A missing legacy timestamp
+        starts a new grace period rather than cancelling from an unknown age.
+        """
+        now = now_utc or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        started = self._safe_parse_utc_iso(cycle.buy_filled_at)
+        if started is None or started > now:
+            # A missing/malformed legacy value or a wall-clock rollback must
+            # not leave a marketable remainder working indefinitely. Start a
+            # fresh bounded grace period from the current observation instead.
+            cycle.buy_filled_at = now.isoformat()
+            return 0.0
+        return max(0.0, (now - started).total_seconds())
+
+    def _buy_partial_market_session_safety_reason(
+        self,
+        cycle: CycleState,
+    ) -> Optional[tuple[str, str]]:
+        """Return a configured safety reason for cancelling a BUY remainder.
+
+        Portfolio limits and what-if checks are intentionally excluded: those
+        decide whether a new order may be submitted. After a positive fill,
+        only market-data and session conditions that make the still-working
+        marketable remainder unsafe are reconsidered.
+        """
+        if bool(getattr(cycle, "rth_only", True)):
+            # Refresh through the adapter on every partial-fill safety check.
+            # The adapter keeps its own bounded cache and closes cached windows
+            # at the exact session boundary, so an old GUI snapshot cannot keep
+            # a remainder working after RTH has ended.
+            rth = self._update_rth_status(self.contract)
+            if not bool(rth.get("is_open", False)):
+                detail = str(
+                    rth.get("message")
+                    or rth.get("source")
+                    or "regular trading hours are closed"
+                )
+                return (
+                    "rth_closed",
+                    f"RTH safety changed while the BUY was filling: {detail}",
+                )
+
+        delayed = self._delayed_live_data_blocker_for_buy(cycle)
+        if delayed is not None:
+            return (
+                str(delayed.get("code") or "non_live_data"),
+                str(
+                    delayed.get("message")
+                    or "Live market-data mode is no longer confirmed."
+                ),
+            )
+
+        stale_message = self._stale_data_guard_message_for_buy(cycle)
+        if stale_message:
+            return "stale_data", stale_message
+
+        if bool(getattr(cycle, "session_timing_guard_enabled", False)):
+            cutoff = int(
+                getattr(cycle, "cancel_buy_before_close_minutes", 0) or 0
+            )
+            if cutoff > 0:
+                timing = self._session_minutes_from_rth_status()
+                if not timing.get("available"):
+                    detail = str(
+                        timing.get("message")
+                        or "regular-session boundaries are unavailable"
+                    )
+                    return (
+                        "session_timing_unavailable",
+                        "Session timing safety changed while the BUY was filling: "
+                        f"{detail}",
+                    )
+                minutes_to_close = timing.get("minutes_to_close")
+                if (
+                    minutes_to_close is not None
+                    and 0 <= float(minutes_to_close) <= cutoff
+                ):
+                    close_text = str(
+                        timing.get("session_close_display")
+                        or "the regular-session close"
+                    )
+                    return (
+                        "session_close",
+                        "Session timing safety changed while the BUY was filling: "
+                        f"{float(minutes_to_close):.1f} minutes remain before "
+                        f"{close_text} (configured cutoff {cutoff} minutes).",
+                    )
+
+        volatility_message = self._volatility_guard_message_for_buy(cycle)
+        if volatility_message:
+            return "volatility", volatility_message
+
+        hard_limits_enabled = bool(
+            getattr(cycle, "hard_risk_limits_enabled", False)
+        )
+        snapshot = self.price_snapshot or {}
+        if hard_limits_enabled:
+            current_price = self._positive_float(
+                snapshot.get("strategy_price")
+                or snapshot.get("price")
+                or cycle.last_price
+            )
+            min_trade_price = float(
+                getattr(cycle, "min_trade_price", 0.0) or 0.0
+            )
+            if (
+                min_trade_price > 0
+                and current_price is not None
+                and current_price < min_trade_price
+            ):
+                return (
+                    "min_trade_price",
+                    "BUY remainder safety changed: current price "
+                    f"{current_price:.4f} is below the configured minimum "
+                    f"trade price {min_trade_price:.4f}.",
+                )
+
+            max_spread = float(
+                getattr(cycle, "max_spread_pct", 0.0) or 0.0
+            )
+            if max_spread > 0:
+                bid = self._positive_float(
+                    self._snapshot_field(snapshot, "bid", "delayedBid")
+                )
+                ask = self._positive_float(
+                    self._snapshot_field(snapshot, "ask", "delayedAsk")
+                )
+                if bid is None or ask is None or ask < bid:
+                    return (
+                        "spread_unverified",
+                        "BUY remainder safety changed: the current bid/ask "
+                        "spread cannot be verified.",
+                    )
+                midpoint = (bid + ask) / 2.0
+                spread_pct = (
+                    ((ask - bid) / midpoint) * 100.0
+                    if midpoint > 0
+                    else float("inf")
+                )
+                if spread_pct > max_spread:
+                    return (
+                        "spread",
+                        "BUY remainder safety changed: spread "
+                        f"{spread_pct:.2f}% exceeds max {max_spread:.2f}%.",
+                    )
+
+            max_gap = float(
+                getattr(cycle, "max_gap_from_prev_close_pct", 0.0) or 0.0
+            )
+            if max_gap > 0:
+                close = self._positive_float(
+                    self._snapshot_field(snapshot, "close", "delayedClose")
+                )
+                market_price = self._positive_float(
+                    self._snapshot_field(
+                        snapshot,
+                        "marketPrice",
+                        "bidAskMidpoint",
+                        "delayedBidAskMidpoint",
+                        "last",
+                        "delayedLast",
+                    )
+                )
+                if close is None or market_price is None:
+                    return (
+                        "gap_unverified",
+                        "BUY remainder safety changed: the current gap from "
+                        "the previous close cannot be verified.",
+                    )
+                gap_pct = abs((market_price / close) - 1.0) * 100.0
+                if gap_pct > max_gap:
+                    return (
+                        "gap",
+                        "BUY remainder safety changed: current gap from close "
+                        f"{gap_pct:.2f}% exceeds max {max_gap:.2f}%.",
+                    )
+        return None
+
+    def _buy_partial_remainder_cancel_action(
+        self,
+        cycle: CycleState,
+        polled: PolledOrderState,
+        cumulative_qty: int,
+        *,
+        now_utc: Optional[datetime] = None,
+    ) -> tuple[Optional[StrategyAction], Optional[dict[str, Any]]]:
+        """Build a delayed or safety-triggered remainder cancellation action."""
+        status = str(polled.status or "").strip()
+        terminal = {
+            "Filled",
+            "Cancelled",
+            "ApiCancelled",
+            "Inactive",
+            "Rejected",
+        }
+        if status in terminal:
+            return None, None
+        if bool(getattr(cycle, "buy_remainder_cancel_requested", False)):
+            return None, None
+        if status in {"CancelRequested", "PendingCancel"} or str(
+            cycle.buy_status or ""
+        ).strip() in {"CancelRequested", "PendingCancel"}:
+            return None, None
+
+        target_qty = max(0, int(cycle.quantity or 0))
+        expected_remaining = max(0, target_qty - max(0, int(cumulative_qty)))
+        reported_remaining = max(0, int(polled.remaining or 0))
+        remaining_qty = max(expected_remaining, reported_remaining)
+        if cumulative_qty <= 0 or remaining_qty <= 0 or not cycle.buy_order_ref:
+            return None, None
+
+        elapsed = self._buy_partial_fill_elapsed_seconds(
+            cycle,
+            now_utc=now_utc,
+        )
+        grace = max(0.1, float(self.BUY_PARTIAL_FILL_GRACE_SECONDS))
+        safety = self._buy_partial_market_session_safety_reason(cycle)
+        if safety is not None:
+            code, detail = safety
+            trigger = "safety"
+            reason = (
+                f"Partial BUY fill is {cumulative_qty} of {target_qty}; "
+                f"cancelling the {remaining_qty}-share remainder immediately "
+                "because a market/session safety condition changed: "
+                f"{detail}"
+            )
+        elif elapsed >= grace:
+            code = "partial_fill_timeout"
+            detail = (
+                "The triggered marketable BUY did not reach a terminal status "
+                "within the grace period."
+            )
+            trigger = "timeout"
+            reason = (
+                f"Partial BUY fill is {cumulative_qty} of {target_qty}; the "
+                f"marketable order remained nonterminal for {elapsed:.2f}s "
+                "after the first fill, so BouncyBot is cancelling the "
+                f"{remaining_qty}-share remainder after the {grace:.1f}s "
+                "grace period."
+            )
+        else:
+            return None, {
+                "trigger": "grace",
+                "code": "partial_fill_grace",
+                "detail": (
+                    "Waiting briefly for the triggered marketable BUY to "
+                    "finish normally."
+                ),
+                "elapsed_seconds": elapsed,
+                "grace_seconds": grace,
+                "filled_quantity": cumulative_qty,
+                "remaining_quantity": remaining_qty,
+            }
+
+        decision = {
+            "trigger": trigger,
+            "code": code,
+            "detail": detail,
+            "elapsed_seconds": elapsed,
+            "grace_seconds": grace,
+            "filled_quantity": cumulative_qty,
+            "remaining_quantity": remaining_qty,
+        }
+        action = StrategyAction(
+            "CANCEL_ORDER",
+            {
+                "order_ref": cycle.buy_order_ref,
+                "order_id": cycle.buy_order_id or polled.order_id,
+                "role": "buy_remainder",
+                "reason": reason,
+                "cancel_decision": dict(decision),
+            },
+        )
+        return action, decision
+
     def _cancel_buy_before_close_if_needed(self, cycle: CycleState) -> None:
         if cycle.stage != Stage.BUY_TRAIL_ACTIVE or not cycle.buy_order_ref:
             return
@@ -5406,7 +5785,9 @@ class TradingController:
         minutes_to_close = timing.get("minutes_to_close")
         if minutes_to_close is None or not (0 <= float(minutes_to_close) <= cutoff):
             return
-        if str(cycle.buy_status or "") == "CancelRequested":
+        if bool(getattr(cycle, "buy_remainder_cancel_requested", False)) or str(
+            cycle.buy_status or ""
+        ) in {"CancelRequested", "PendingCancel"}:
             return
         if self._broker_mutation_blocked_by_storage_fault(
             "Session-timing BUY cancellation",
@@ -5416,6 +5797,7 @@ class TradingController:
         try:
             self.adapter.cancel_order(cycle.buy_order_ref, cycle.buy_order_id)
             cycle.buy_status = "CancelRequested"
+            cycle.buy_remainder_cancel_requested = True
             close_text = str(timing.get("session_close_display") or "the regular-session close")
             cycle.error_message = f"Session timing guard: cancelled active BUY trail {float(minutes_to_close):.1f} minutes before {close_text}."
             cycle.touch()
@@ -5458,7 +5840,7 @@ class TradingController:
         cycle: CycleState,
         current_price: float,
     ) -> bool:
-        """Start the Stage-3 close policy only for a grossly profitable quote."""
+        """Start the Stage-3 close policy only for a profitable executable bid."""
         if cycle.stage != Stage.WAIT_RISE_TRIGGER:
             return False
         if not bool(getattr(cycle, "cancel_sell_and_liquidate_before_close_enabled", False)):
@@ -5483,12 +5865,12 @@ class TradingController:
             return False
 
         avg_buy = float(cycle.avg_buy_price or 0.0)
-        selected_price = float(current_price or 0.0)
-        if avg_buy <= 0 or selected_price <= avg_buy:
+        executable_bid = float(current_price or 0.0)
+        if avg_buy <= 0 or executable_bid <= avg_buy:
             self._log_price_warning_throttled(
                 cycle,
-                "Close-before-RTH Stage-3 liquidation was not started because the selected current price "
-                f"({selected_price:.4f}) is not strictly above the average BUY price ({avg_buy:.4f}). "
+                "Close-before-RTH Stage-3 liquidation was not started because the executable SELL bid "
+                f"({executable_bid:.4f}) is not strictly above the average BUY price ({avg_buy:.4f}). "
                 "Commissions are intentionally ignored for this comparison.",
                 interval_seconds=60.0,
                 throttle_key=f"stage3_close_not_profitable|{cycle.id}",
@@ -5499,7 +5881,7 @@ class TradingController:
             cycle.close_before_rth_liquidation_requested = True
             cycle.close_before_rth_cancel_requested = False
             cycle.error_message = (
-                f"Stage-3 close-before-RTH liquidation started at selected price {selected_price:.4f}, "
+                f"Stage-3 close-before-RTH liquidation started at executable bid {executable_bid:.4f}, "
                 f"above average BUY {avg_buy:.4f}, with {minutes_to_close:.1f} minutes to close."
             )
             cycle.touch()
@@ -5513,7 +5895,11 @@ class TradingController:
                 stage_after=cycle.stage.value,
                 decision_result="gross_profit_condition_passed",
                 raw={
-                    "selected_price": selected_price,
+                    # Retain selected_price for backward-compatible audit
+                    # readers while making the executable-side meaning explicit.
+                    "selected_price": executable_bid,
+                    "executable_bid": executable_bid,
+                    "price_role": "sell_executable_bid",
                     "average_buy_price": avg_buy,
                     "commissions_ignored": True,
                     "minutes_to_close": minutes_to_close,
@@ -5842,6 +6228,23 @@ class TradingController:
                             self.active_cycle.buy_remainder_cancel_requested = True
                             self.active_cycle.touch()
                             self.storage.upsert_cycle(self.active_cycle)
+                            decision = dict(action.payload.get("cancel_decision") or {})
+                            self.storage.add_decision_event(
+                                event_type="BUY_REMAINDER_CANCEL_REQUESTED",
+                                message=str(
+                                    action.payload.get("reason")
+                                    or "BUY remainder cancellation requested."
+                                ),
+                                cycle=self.active_cycle,
+                                stage_before=self.active_cycle.stage.value,
+                                stage_after=self.active_cycle.stage.value,
+                                decision_result=str(
+                                    decision.get("trigger") or "requested"
+                                ),
+                                broker_order_id=action.payload.get("order_id"),
+                                perm_id=self.active_cycle.buy_perm_id,
+                                raw={"partial_fill_policy": decision},
+                            )
                         self._log("INFO", action.payload.get("reason", "Cancel requested."), cycle)
                     except BrokerAdapterError as exc:
                         if action.payload.get("role") == "buy_remainder" and self.active_cycle:
@@ -6171,6 +6574,397 @@ class TradingController:
         lowered = str(message or "").lower()
         return "current broker position is already" in lowered and "expected no open long position" in lowered
 
+    def _reset_stage3_sell_confirmation(self, cycle_id: str = "") -> None:
+        if not cycle_id or str(self._stage3_sell_confirmation.get("cycle_id") or "") == str(cycle_id):
+            self._stage3_sell_confirmation.clear()
+
+    def _snapshot_age_now(
+        self,
+        snapshot: dict[str, Any],
+        received_at_key: str,
+        age_key: str,
+    ) -> Optional[float]:
+        parsed = self._safe_parse_utc_iso(snapshot.get(received_at_key))
+        if parsed is not None:
+            return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+        try:
+            recorded_age = float(snapshot.get(age_key))
+        except (TypeError, ValueError):
+            return None
+        snapshot_time = self._safe_parse_utc_iso(snapshot.get("timestamp"))
+        if snapshot_time is None:
+            return max(0.0, recorded_age)
+        elapsed = max(0.0, (datetime.now(timezone.utc) - snapshot_time).total_seconds())
+        return max(0.0, recorded_age + elapsed)
+
+    def _snapshot_field_age_now(
+        self,
+        snapshot: dict[str, Any],
+        field_name: str,
+    ) -> Optional[float]:
+        """Return a field's current age from its independent update stamp."""
+        received_at = dict(
+            snapshot.get("field_update_received_at")
+            or snapshot.get("field_change_received_at")
+            or {}
+        )
+        parsed = self._safe_parse_utc_iso(received_at.get(field_name))
+        if parsed is not None:
+            return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+        ages = dict(
+            snapshot.get("field_update_age_seconds")
+            or snapshot.get("field_change_age_seconds")
+            or {}
+        )
+        try:
+            recorded_age = float(ages.get(field_name))
+        except (TypeError, ValueError):
+            return None
+        snapshot_time = self._safe_parse_utc_iso(snapshot.get("timestamp"))
+        if snapshot_time is None:
+            return max(0.0, recorded_age)
+        elapsed = max(0.0, (datetime.now(timezone.utc) - snapshot_time).total_seconds())
+        return max(0.0, recorded_age + elapsed)
+
+    def _stage3_sell_quote_evidence(
+        self,
+        cycle: CycleState,
+        *,
+        require_latest_event: bool,
+        require_trigger: bool = True,
+    ) -> tuple[Optional[dict[str, Any]], str]:
+        """Return quote evidence that can safely arm a normal Stage-3 exit.
+
+        The production adapter exposes per-field change identity.  This guard
+        deliberately rejects a whole-ticker event when the selected price fell
+        back to an unchanged Last, requires a recent valid top-of-book pair,
+        applies the configured spread ceiling, and confirms the profit trigger
+        on the executable SELL side (bid) rather than on a cached convenience
+        price.
+        """
+        snapshot = dict(self.price_snapshot or {})
+        if not bool(snapshot.get("market_data_field_tracking")):
+            return None, "Field-level market-data freshness is unavailable."
+        if require_latest_event and not bool(snapshot.get("api_data_received_in_latest_read")):
+            return None, "No distinct market-data update is available for SELL confirmation."
+        # Stage 3 is confirmed on the executable bid, not on the adapter's
+        # convenience marketPrice. A fresh bid/ask event remains usable here
+        # even when marketPrice temporarily resolves to an unchanged cached
+        # Last; the generic selected price stays blocked for ATR and all other
+        # strategy paths.
+        if snapshot.get("upstream_connected") is not True:
+            return None, "IBKR upstream connectivity is not confirmed."
+
+        try:
+            sequence = int(snapshot.get("market_data_update_sequence") or 0)
+        except Exception:
+            sequence = 0
+        subscription_id = str(snapshot.get("market_data_subscription_id") or "")
+        if sequence <= 0 or not subscription_id:
+            return None, "Market-data event identity is unavailable."
+
+        fields = dict(snapshot.get("fields") or {})
+        basis = str(snapshot.get("selected_price_basis") or snapshot.get("source") or "")
+        mode_value = snapshot.get("subscription_market_data_type")
+        if mode_value is None:
+            mode_value = snapshot.get("selected_market_data_type")
+        try:
+            delayed_mode = int(mode_value) in {3, 4}
+        except Exception:
+            delayed_mode = basis.startswith("delayed_")
+        if basis.startswith("delayed_"):
+            delayed_mode = True
+
+        # ib_async normalizes delayed price ticks into Ticker.bid/ask/last.
+        # Older test doubles and audit readers may still expose delayedBid and
+        # delayedAsk explicitly, so use those only when either is actually
+        # present; otherwise the standard fields carry both live and delayed
+        # values and the market-data type supplies the label.
+        explicit_delayed_quote = delayed_mode and (
+            fields.get("delayedBid") is not None or fields.get("delayedAsk") is not None
+        )
+        if explicit_delayed_quote:
+            bid_name, ask_name = "delayedBid", "delayedAsk"
+            quote_sequence_key = "delayed_quote_update_sequence"
+            quote_received_at_key = "delayed_quote_update_received_at"
+            quote_age_key = "delayed_quote_update_age_seconds"
+        else:
+            bid_name, ask_name = "bid", "ask"
+            quote_sequence_key = "quote_update_sequence"
+            quote_received_at_key = "quote_update_received_at"
+            quote_age_key = "quote_update_age_seconds"
+        quote_kind = "delayed" if delayed_mode else "live"
+
+        bid = self._positive_float(fields.get(bid_name))
+        ask = self._positive_float(fields.get(ask_name))
+        if bid is None or ask is None:
+            return None, f"The current {quote_kind} bid/ask pair is incomplete."
+        if ask < bid:
+            return None, f"The current {quote_kind} bid/ask pair is crossed."
+        try:
+            quote_sequence = int(snapshot.get(quote_sequence_key) or 0)
+        except Exception:
+            quote_sequence = 0
+        quote_age = self._snapshot_age_now(snapshot, quote_received_at_key, quote_age_key)
+        max_quote_age = max(0.1, float(getattr(cycle, "max_bid_ask_age_seconds", 3.0) or 3.0))
+        if quote_sequence <= 0 or quote_age is None:
+            return None, f"The current {quote_kind} bid/ask update time is unavailable."
+        if require_latest_event:
+            updated_fields = set(snapshot.get("fields_updated_in_event") or [])
+            if quote_sequence != sequence or not updated_fields.intersection({bid_name, ask_name}):
+                return None, (
+                    f"The latest market-data event did not update the current {quote_kind} "
+                    "bid or ask, so it cannot count as a SELL confirmation."
+                )
+        if quote_age > max_quote_age:
+            return None, (
+                f"The current {quote_kind} bid/ask pair is {quote_age:.1f}s old, above the "
+                f"configured {max_quote_age:.1f}s maximum."
+            )
+
+        # A recent update to one side must not make an old opposite side look
+        # fresh.  The executable bid and the ask used to validate the spread
+        # each need their own recent change timestamp.
+        bid_age = self._snapshot_field_age_now(snapshot, bid_name)
+        ask_age = self._snapshot_field_age_now(snapshot, ask_name)
+        if bid_age is None or ask_age is None:
+            return None, f"Independent {quote_kind} bid/ask field timestamps are unavailable."
+        stale_sides = [
+            f"bid {bid_age:.1f}s" if bid_age > max_quote_age else "",
+            f"ask {ask_age:.1f}s" if ask_age > max_quote_age else "",
+        ]
+        stale_sides = [item for item in stale_sides if item]
+        if stale_sides:
+            return None, (
+                f"The current {quote_kind} {' and '.join(stale_sides)} exceed the configured "
+                f"{max_quote_age:.1f}s maximum."
+            )
+
+        midpoint = (bid + ask) / 2.0
+        spread_pct = ((ask - bid) / midpoint) * 100.0 if midpoint > 0 else float("inf")
+        max_spread = max(0.0, float(getattr(cycle, "max_spread_pct", 0.0) or 0.0))
+        if max_spread > 0 and spread_pct > max_spread:
+            return None, (
+                f"The current {quote_kind} spread {spread_pct:.2f}% exceeds the configured "
+                f"maximum {max_spread:.2f}%."
+            )
+
+        trigger = float(
+            cycle.rise_trigger_price
+            or StrategyEngine.recalculate_rise_trigger_price(cycle)
+            or 0.0
+        )
+        try:
+            min_tick = max(0.0, float(getattr(self.contract, "min_tick", 0.0) or 0.0))
+        except Exception:
+            min_tick = 0.0
+        trigger_tolerance = max(1e-9, min_tick)
+        if require_trigger and trigger <= 0:
+            return None, "The minimum-profit rise trigger is unavailable."
+        if require_trigger and bid + trigger_tolerance < trigger:
+            return None, (
+                f"The executable SELL bid {bid:.4f} does not confirm the rise trigger "
+                f"{trigger:.4f}."
+            )
+
+        field_ages = dict(
+            snapshot.get("field_update_age_seconds")
+            or snapshot.get("field_change_age_seconds")
+            or {}
+        )
+        field_received_at = dict(
+            snapshot.get("field_update_received_at")
+            or snapshot.get("field_change_received_at")
+            or {}
+        )
+        last_age = None
+        if basis in {"last", "delayed_last"}:
+            last_name = "delayedLast" if basis == "delayed_last" else "last"
+            parsed = self._safe_parse_utc_iso(field_received_at.get(last_name))
+            if parsed is not None:
+                last_age = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+            else:
+                try:
+                    last_age = float(field_ages.get(last_name))
+                except (TypeError, ValueError):
+                    last_age = None
+
+        evidence = {
+            "cycle_id": cycle.id,
+            "subscription_id": subscription_id,
+            "sequence": sequence,
+            "quote_sequence": quote_sequence,
+            "quote_kind": quote_kind,
+            "quote_age_seconds": quote_age,
+            "bid_age_seconds": bid_age,
+            "ask_age_seconds": ask_age,
+            "bid": bid,
+            "ask": ask,
+            "midpoint": midpoint,
+            "spread_pct": spread_pct,
+            "max_spread_pct": max_spread,
+            "rise_trigger_price": trigger,
+            "reference_price": bid,
+            "selected_price": self._positive_float(snapshot.get("price")),
+            "selected_price_source": str(snapshot.get("source") or ""),
+            "selected_price_basis": basis,
+            "selected_price_basis_sequence": snapshot.get("selected_price_basis_update_sequence"),
+            "selected_price_basis_age_seconds": snapshot.get("selected_price_basis_age_seconds"),
+            "selected_price_basis_updated_in_event": snapshot.get("selected_price_basis_updated_in_event"),
+            "selected_price_basis_changed_in_update": snapshot.get("selected_price_basis_changed_in_update"),
+            "last_field_age_seconds": last_age,
+            "fields_updated_in_event": list(snapshot.get("fields_updated_in_event") or []),
+            "fields_changed_in_update": list(snapshot.get("fields_changed_in_update") or []),
+            "captured_at": utc_now_iso(),
+        }
+        return evidence, ""
+
+    def _confirm_stage3_sell_evidence(
+        self,
+        cycle: CycleState,
+        evidence: dict[str, Any],
+    ) -> bool:
+        previous = dict(self._stage3_sell_confirmation or {})
+        same_context = bool(
+            previous
+            and str(previous.get("cycle_id") or "") == cycle.id
+            and str(previous.get("subscription_id") or "") == str(evidence.get("subscription_id") or "")
+        )
+        current_sequence = int(evidence.get("sequence") or 0)
+        previous_sequence = int(previous.get("sequence") or 0) if same_context else 0
+        current_quote_sequence = int(evidence.get("quote_sequence") or 0)
+        previous_quote_sequence = int(previous.get("quote_sequence") or 0) if same_context else 0
+        if same_context and (
+            current_sequence <= previous_sequence
+            or current_quote_sequence <= previous_quote_sequence
+        ):
+            return False
+        if not same_context:
+            self._stage3_sell_confirmation = dict(evidence)
+            self.storage.add_decision_event(
+                event_type="SELL_TRIGGER_CONFIRMATION_STARTED",
+                message=(
+                    "The executable bid reached the Stage-3 trigger with a fresh valid quote. "
+                    "Waiting for one more distinct consistent market-data update before arming the final SELL."
+                ),
+                cycle=cycle,
+                stage_before=cycle.stage.value,
+                stage_after=cycle.stage.value,
+                decision_result="waiting_confirmation",
+                raw={
+                    "required_confirmations": self.STAGE3_SELL_CONFIRMATIONS_REQUIRED,
+                    "evidence": dict(evidence),
+                },
+            )
+            return False
+
+        self._stage3_sell_confirmation.clear()
+        self.storage.add_decision_event(
+            event_type="SELL_TRIGGER_CONFIRMATION_PASSED",
+            message="Two distinct fresh quote observations confirmed the Stage-3 final-SELL trigger.",
+            cycle=cycle,
+            stage_before=cycle.stage.value,
+            stage_after=cycle.stage.value,
+            decision_result="confirmed",
+            raw={
+                "required_confirmations": self.STAGE3_SELL_CONFIRMATIONS_REQUIRED,
+                "first_evidence": previous,
+                "second_evidence": dict(evidence),
+            },
+        )
+        return True
+
+    @staticmethod
+    def _stage3_waiting_cycle_with_price(cycle: CycleState, price: float) -> CycleState:
+        waiting = copy(cycle)
+        waiting.last_price = float(price)
+        waiting.rise_trigger_price = StrategyEngine.recalculate_rise_trigger_price(waiting)
+        waiting.touch()
+        return waiting
+
+    def _stage3_sell_submission_guard_message(
+        self,
+        cycle: CycleState,
+        payload: dict[str, Any],
+    ) -> Optional[str]:
+        expected = payload.get("stage3_market_data_guard")
+        if not isinstance(expected, dict):
+            return None
+        evidence, message = self._stage3_sell_quote_evidence(cycle, require_latest_event=False)
+        if evidence is None:
+            return f"Final SELL market-data revalidation failed: {message}"
+        for key in (
+            "cycle_id",
+            "subscription_id",
+            "sequence",
+            "quote_sequence",
+            "quote_kind",
+            "selected_price_source",
+            "selected_price_basis",
+            "selected_price_basis_sequence",
+        ):
+            if str(evidence.get(key)) != str(expected.get(key)):
+                return (
+                    "Final SELL market-data revalidation failed: the quote identity changed "
+                    f"between confirmation and submission ({key})."
+                )
+        try:
+            expected_bid = float(expected.get("bid") or 0.0)
+            current_bid = float(evidence.get("bid") or 0.0)
+            expected_ask = float(expected.get("ask") or 0.0)
+            current_ask = float(evidence.get("ask") or 0.0)
+        except Exception:
+            expected_bid = 0.0
+            current_bid = 0.0
+            expected_ask = 0.0
+            current_ask = 0.0
+        try:
+            min_tick = max(1e-9, float(getattr(self.contract, "min_tick", 0.0) or 0.0))
+        except Exception:
+            min_tick = 1e-9
+        if expected_bid <= 0 or current_bid <= 0 or abs(current_bid - expected_bid) > min_tick:
+            return "Final SELL market-data revalidation failed: the executable bid changed before submission."
+        if expected_ask <= 0 or current_ask <= 0 or abs(current_ask - expected_ask) > min_tick:
+            return "Final SELL market-data revalidation failed: the ask changed before submission."
+        try:
+            reference_price = float(payload.get("reference_price") or 0.0)
+        except Exception:
+            reference_price = 0.0
+        if reference_price <= 0 or abs(reference_price - current_bid) > min_tick:
+            return "Final SELL market-data revalidation failed: the order reference is not the confirmed executable bid."
+        return None
+
+    def _rollback_final_sell_market_data_block(
+        self,
+        cycle: CycleState,
+        message: str,
+        *,
+        order_ref: str = "",
+    ) -> None:
+        if order_ref:
+            try:
+                self.storage.mark_order_intent_failed(
+                    order_ref,
+                    message,
+                    raw={"reason": "stage3_market_data_revalidation"},
+                )
+            except Exception:
+                pass
+        rolled_back = StrategyEngine.rollback_unsubmitted_order(cycle, "SELL", message)
+        self.active_cycle = rolled_back
+        self.storage.upsert_cycle(rolled_back)
+        self._reset_stage3_sell_confirmation(cycle.id)
+        self.storage.add_decision_event(
+            event_type="SELL_MARKET_DATA_REVALIDATION_BLOCKED",
+            message=message,
+            cycle=rolled_back,
+            stage_before=cycle.stage.value,
+            stage_after=rolled_back.stage.value,
+            decision_result="blocked",
+            raw={"order_ref": order_ref},
+        )
+        self._log("WARN", message, rolled_back)
+
     def _advance_waiting_cycle_from_price(
         self,
         cycle: CycleState,
@@ -6199,6 +6993,42 @@ class TradingController:
                 return paused, []
             if self._cycle_paused_for_atr_warmup(cycle):
                 return StrategyEngine.restart_initial_drop_from_price(cycle, last_price), []
+        if cycle.stage == Stage.WAIT_RISE_TRIGGER and bool(
+            (self.price_snapshot or {}).get("market_data_field_tracking")
+        ):
+            evidence, guard_message = self._stage3_sell_quote_evidence(
+                cycle,
+                require_latest_event=True,
+            )
+            if evidence is None:
+                self._reset_stage3_sell_confirmation(cycle.id)
+                if guard_message and "does not confirm the rise trigger" not in guard_message:
+                    self._log_price_warning_throttled(
+                        cycle,
+                        f"Final SELL trigger not armed: {guard_message}",
+                        interval_seconds=30.0,
+                        throttle_key=f"stage3_sell_quote_guard|{cycle.id}|{guard_message}",
+                    )
+                # Keep the cycle's last actionable price rather than persisting
+                # a rejected convenience value such as an unchanged cached
+                # Last.  The GUI still displays the raw snapshot separately.
+                retained_price = self._positive_float(cycle.last_price) or float(last_price)
+                return self._stage3_waiting_cycle_with_price(cycle, retained_price), []
+
+            reference_price = float(evidence["reference_price"])
+            if not self._confirm_stage3_sell_evidence(cycle, evidence):
+                return self._stage3_waiting_cycle_with_price(cycle, reference_price), []
+
+            next_cycle, actions = StrategyEngine.on_price_update(
+                cycle,
+                reference_price,
+                is_rth=is_rth,
+                rth_message=rth_message,
+            )
+            for action in actions:
+                if action.action_type in {"PLACE_SELL_TRAIL", "PLACE_SELL_MARKET"}:
+                    action.payload["stage3_market_data_guard"] = dict(evidence)
+            return next_cycle, actions
         return StrategyEngine.on_price_update(
             cycle,
             last_price,
@@ -6599,12 +7429,26 @@ class TradingController:
         except Exception:
             pass
         order_type = "PROTECTIVE_TRAIL" if role == "PROTECTIVE_SELL" else "TRAIL"
+        if rollback_side == "SELL" and isinstance(payload.get("stage3_market_data_guard"), dict):
+            guard_message = self._stage3_sell_submission_guard_message(cycle, payload)
+            if guard_message:
+                self._rollback_final_sell_market_data_block(cycle, guard_message)
+                return
         self._record_order_intent(cycle, payload, side, order_type, role=role)
         if self._broker_mutation_blocked_by_storage_fault(
             f"{rollback_side} trailing-order submission",
             cycle,
         ):
             return
+        if rollback_side == "SELL" and isinstance(payload.get("stage3_market_data_guard"), dict):
+            guard_message = self._stage3_sell_submission_guard_message(cycle, payload)
+            if guard_message:
+                self._rollback_final_sell_market_data_block(
+                    cycle,
+                    guard_message,
+                    order_ref=str(payload.get("order_ref") or ""),
+                )
+                return
         try:
             handle = self.adapter.place_trailing_stop(
                 contract=self.contract,
@@ -6731,12 +7575,26 @@ class TradingController:
             self.storage.backup_database("before_order_submit")
         except Exception:
             pass
+        if rollback_side == "SELL" and isinstance(payload.get("stage3_market_data_guard"), dict):
+            guard_message = self._stage3_sell_submission_guard_message(cycle, payload)
+            if guard_message:
+                self._rollback_final_sell_market_data_block(cycle, guard_message)
+                return
         self._record_order_intent(cycle, payload, side, "MKT")
         if self._broker_mutation_blocked_by_storage_fault(
             f"{rollback_side} market-order submission",
             cycle,
         ):
             return
+        if rollback_side == "SELL" and isinstance(payload.get("stage3_market_data_guard"), dict):
+            guard_message = self._stage3_sell_submission_guard_message(cycle, payload)
+            if guard_message:
+                self._rollback_final_sell_market_data_block(
+                    cycle,
+                    guard_message,
+                    order_ref=str(payload.get("order_ref") or ""),
+                )
+                return
         try:
             handle = self.adapter.place_market_order(
                 contract=self.contract,
@@ -6988,12 +7846,6 @@ class TradingController:
         )
         next_cycle.buy_order_id = polled.order_id or next_cycle.buy_order_id
         next_cycle.buy_perm_id = polled.perm_id or next_cycle.buy_perm_id
-        self.active_cycle = next_cycle
-        self.storage.upsert_cycle(next_cycle)
-
-        first_observed_buy_fill = previous_qty <= 0 and cumulative_qty > 0
-        if first_observed_buy_fill:
-            self._start_trade_market_data_capture("BUY_FILL", next_cycle, polled)
 
         terminal = str(polled.status or "").strip() in {
             "Filled",
@@ -7002,26 +7854,53 @@ class TradingController:
             "Inactive",
             "Rejected",
         }
+        cancel_action: Optional[StrategyAction] = None
+        cancel_decision: Optional[dict[str, Any]] = None
+        if not terminal:
+            cancel_action, cancel_decision = self._buy_partial_remainder_cancel_action(
+                next_cycle,
+                polled,
+                cumulative_qty,
+            )
+            if cancel_action is not None:
+                actions.append(cancel_action)
+
+        self.active_cycle = next_cycle
+        self.storage.upsert_cycle(next_cycle)
+
+        first_observed_buy_fill = previous_qty <= 0 and cumulative_qty > 0
+        if first_observed_buy_fill:
+            self._start_trade_market_data_capture("BUY_FILL", next_cycle, polled)
+
         if not terminal:
             if cumulative_qty != previous_qty:
+                grace = max(0.1, float(self.BUY_PARTIAL_FILL_GRACE_SECONDS))
+                elapsed = float((cancel_decision or {}).get("elapsed_seconds") or 0.0)
+                remaining_grace = max(0.0, grace - elapsed)
+                if cancel_action is None:
+                    status_message = (
+                        f"The triggered marketable BUY is being allowed up to {grace:.1f}s to finish normally; "
+                        f"approximately {remaining_grace:.2f}s of grace remains."
+                    )
+                    decision_result = "awaiting_terminal_buy"
+                else:
+                    status_message = str(cancel_action.payload.get("reason") or "BUY remainder cancellation requested.")
+                    decision_result = f"cancel_{(cancel_decision or {}).get('trigger') or 'requested'}"
                 self.storage.add_decision_event(
                     event_type="BUY_PARTIAL_FILL",
-                    message=(
-                        f"BUY cumulative fill is {cumulative_qty}; the original order remains active until "
-                        "IBKR confirms a terminal status."
-                    ),
+                    message=f"BUY cumulative fill is {cumulative_qty}. {status_message}",
                     cycle=next_cycle,
                     stage_before=cycle.stage.value,
                     stage_after=next_cycle.stage.value,
-                    decision_result="awaiting_terminal_buy",
+                    decision_result=decision_result,
                     broker_order_id=polled.order_id,
                     perm_id=polled.perm_id,
-                    raw=polled.raw,
+                    raw={**dict(polled.raw or {}), "partial_fill_policy": dict(cancel_decision or {})},
                 )
                 self._log(
-                    "INFO",
-                    f"Partial BUY fill reconciled: {cumulative_qty} filled, {max(0, polled.remaining)} remaining. "
-                    "Waiting for the original BUY order to become terminal.",
+                    "INFO" if cancel_action is None else "WARN",
+                    f"Partial BUY fill reconciled: {cumulative_qty} filled, {max(0, polled.remaining)} reported remaining. "
+                    f"{status_message}",
                     next_cycle,
                 )
             if first_observed_buy_fill:
@@ -7328,16 +8207,51 @@ class TradingController:
     def _submit_close_before_rth_market_sell(self, cycle: CycleState) -> bool:
         """Submit an RTH-only DAY market SELL after any prior exit is terminal."""
         stage3_profit_exit = cycle.stage == Stage.WAIT_RISE_TRIGGER
-        reference_price = float((self.price_snapshot or {}).get("price") or cycle.last_price or 0.0)
         avg_buy = float(cycle.avg_buy_price or 0.0)
-        if stage3_profit_exit and (reference_price <= 0 or avg_buy <= 0 or reference_price <= avg_buy):
-            protective_was_cancelled = bool(cycle.protective_sell_order_ref) and str(
-                cycle.protective_sell_status or ""
-            ) in {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
+        field_tracking = bool((self.price_snapshot or {}).get("market_data_field_tracking"))
+        stage3_quote_evidence: Optional[dict[str, Any]] = None
+        stage3_quote_message = ""
+        if stage3_profit_exit and field_tracking:
+            stage3_quote_evidence, stage3_quote_message = self._stage3_sell_quote_evidence(
+                cycle,
+                require_latest_event=False,
+                require_trigger=False,
+            )
+            reference_price = (
+                float(stage3_quote_evidence.get("bid") or 0.0)
+                if stage3_quote_evidence is not None
+                else 0.0
+            )
+        else:
+            # Compatibility fallback for deterministic/offline adapters that
+            # predate field-level market-data identity. The production adapter
+            # always takes the independently fresh bid/ask path above.
+            reference_price = float((self.price_snapshot or {}).get("price") or cycle.last_price or 0.0)
+
+        protective_was_cancelled = bool(cycle.protective_sell_order_ref) and str(
+            cycle.protective_sell_status or ""
+        ) in {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
+        if stage3_profit_exit and field_tracking and stage3_quote_evidence is None:
+            detail = stage3_quote_message or "the current Stage-3 bid/ask quote is unavailable"
             if protective_was_cancelled:
                 self._move_close_before_rth_to_error(
                     cycle,
-                    "the Stage-3 protective SELL became terminal, but the selected current price is no longer "
+                    "the Stage-3 protective SELL became terminal, but a fresh complete executable quote "
+                    f"could not be revalidated ({detail})",
+                )
+            else:
+                cycle.close_before_rth_liquidation_requested = False
+                cycle.close_before_rth_cancel_requested = False
+                cycle.error_message = None
+                cycle.touch()
+                self.active_cycle = cycle
+                self.storage.upsert_cycle(cycle)
+            return False
+        if stage3_profit_exit and (reference_price <= 0 or avg_buy <= 0 or reference_price <= avg_buy):
+            if protective_was_cancelled:
+                self._move_close_before_rth_to_error(
+                    cycle,
+                    "the Stage-3 protective SELL became terminal, but the executable SELL bid is no longer "
                     f"strictly above the average BUY price ({reference_price:.4f} versus {avg_buy:.4f})",
                 )
             else:
@@ -7393,6 +8307,46 @@ class TradingController:
             )
             return False
 
+        if stage3_profit_exit and field_tracking:
+            refreshed, message = self._stage3_sell_quote_evidence(
+                cycle,
+                require_latest_event=False,
+                require_trigger=False,
+            )
+            if refreshed is None:
+                detail = message or "the current Stage-3 bid/ask quote is unavailable"
+                if protective_was_cancelled:
+                    self._move_close_before_rth_to_error(
+                        cycle,
+                        "the Stage-3 protective SELL became terminal, but the executable quote became invalid "
+                        f"before the market-order intent was recorded ({detail})",
+                    )
+                else:
+                    cycle.close_before_rth_liquidation_requested = False
+                    cycle.close_before_rth_cancel_requested = False
+                    cycle.error_message = None
+                    cycle.touch()
+                    self.active_cycle = cycle
+                    self.storage.upsert_cycle(cycle)
+                return False
+            stage3_quote_evidence = refreshed
+            reference_price = float(refreshed.get("bid") or 0.0)
+            if reference_price <= 0 or avg_buy <= 0 or reference_price <= avg_buy:
+                if protective_was_cancelled:
+                    self._move_close_before_rth_to_error(
+                        cycle,
+                        "the Stage-3 protective SELL became terminal, but the executable SELL bid was no longer "
+                        f"strictly above the average BUY price before intent ({reference_price:.4f} versus {avg_buy:.4f})",
+                    )
+                else:
+                    cycle.close_before_rth_liquidation_requested = False
+                    cycle.close_before_rth_cancel_requested = False
+                    cycle.error_message = None
+                    cycle.touch()
+                    self.active_cycle = cycle
+                    self.storage.upsert_cycle(cycle)
+                return False
+
         order_ref = make_order_ref(cycle.ticker, cycle.cycle_number, cycle.id, "RTH_CLOSE_SELL_MARKET")
         stage_before = cycle.stage.value
         cycle.sell_order_ref = order_ref
@@ -7418,6 +8372,8 @@ class TradingController:
             "outside_rth": False,
             "automatic_close_before_rth": True,
         }
+        if stage3_quote_evidence is not None:
+            payload["stage3_market_data_guard"] = dict(stage3_quote_evidence)
         try:
             self.storage.backup_database("before_order_submit")
         except Exception:
@@ -7428,6 +8384,70 @@ class TradingController:
             cycle,
         ):
             return False
+        if stage3_profit_exit and field_tracking:
+            refreshed, message = self._stage3_sell_quote_evidence(
+                cycle,
+                require_latest_event=False,
+                require_trigger=False,
+            )
+            try:
+                min_tick = max(1e-9, float(getattr(self.contract, "min_tick", 0.0) or 0.0))
+            except Exception:
+                min_tick = 1e-9
+            quote_changed = False
+            if refreshed is not None and stage3_quote_evidence is not None:
+                quote_changed = any(
+                    str(refreshed.get(key)) != str(stage3_quote_evidence.get(key))
+                    for key in (
+                        "cycle_id",
+                        "subscription_id",
+                        "sequence",
+                        "quote_sequence",
+                        "quote_kind",
+                        "selected_price_source",
+                        "selected_price_basis",
+                        "selected_price_basis_sequence",
+                    )
+                )
+                try:
+                    quote_changed = quote_changed or abs(
+                        float(refreshed.get("bid") or 0.0) - reference_price
+                    ) > min_tick
+                    quote_changed = quote_changed or abs(
+                        float(refreshed.get("ask") or 0.0)
+                        - float(stage3_quote_evidence.get("ask") or 0.0)
+                    ) > min_tick
+                except Exception:
+                    quote_changed = True
+            if (
+                refreshed is None
+                or quote_changed
+                or float(refreshed.get("bid") or 0.0) <= avg_buy
+            ):
+                detail = message or (
+                    "the executable quote identity or bid changed between durable intent and broker submission"
+                )
+                try:
+                    self.storage.mark_order_intent_failed(
+                        order_ref,
+                        detail,
+                        raw={"payload": payload, "side": "SELL", "reason": "stage3_quote_revalidation"},
+                    )
+                except Exception:
+                    pass
+                if protective_was_cancelled:
+                    self._move_close_before_rth_to_error(
+                        cycle,
+                        "the Stage-3 protective SELL became terminal, but the executable quote could not be "
+                        f"revalidated immediately before market-order submission ({detail})",
+                    )
+                else:
+                    rolled_back = StrategyEngine.rollback_unsubmitted_order(cycle, "SELL", detail)
+                    rolled_back.close_before_rth_liquidation_requested = False
+                    rolled_back.close_before_rth_cancel_requested = False
+                    self.active_cycle = rolled_back
+                    self.storage.upsert_cycle(rolled_back)
+                return False
         try:
             handle = self.adapter.place_market_order(
                 contract=self.contract,
@@ -7489,6 +8509,8 @@ class TradingController:
                 "configured_minutes": int(cycle.liquidate_before_close_minutes),
                 "stage3_profit_condition": stage3_profit_exit,
                 "reference_price": reference_price,
+                "executable_bid": reference_price if stage3_profit_exit else None,
+                "stage3_market_data_guard": dict(stage3_quote_evidence or {}),
                 "average_buy_price": avg_buy,
                 "commissions_ignored": stage3_profit_exit,
             },
