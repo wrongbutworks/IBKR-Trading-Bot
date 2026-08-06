@@ -1,6 +1,6 @@
 # Deterministic offline behavior tests
 
-This document describes the current non-GUI, non-Windows, non-network test layer in v3.6.0. It covers strategy behavior, controller state transitions, broker-event handling, persistence and recovery, shutdown checkpoints, GUI contracts, and bounded performance behavior.
+This document describes the current non-GUI, non-Windows, non-network test layer in v3.8.0. It covers strategy behavior, controller state transitions, BUY partial-fill grace/timeout safety, broker-event handling, persistence and recovery, shutdown checkpoints, GUI contracts, and bounded performance behavior.
 
 The suite deliberately avoids:
 
@@ -76,10 +76,16 @@ These tests verify SQLite/application recovery semantics. They do not claim to r
 The deterministic assertions verify that:
 
 - cached pre-outage data is never reclassified as fresh;
-- ATR and strategy advancement require a new event;
+- ATR and generic strategy-price advancement require a new event in which the selected raw field/quote basis updated; the Stage-3 final SELL additionally requires independently fresh bid/ask evidence on two distinct quote events;
 - new orders remain blocked while connectivity or reconciliation is uncertain;
 - subscription replacement/retention follows the restoration mode;
 - a final connectivity check prevents a late-race order submission.
+
+### v3.8.0 BUY partial-fill grace and cancellation sequences
+
+`tests/test_v380_buy_partial_fill_grace.py` drives real controller, strategy, storage, and deterministic broker boundaries through the revised Stage-2 policy. It verifies a fixed 3.0-second grace from the first positive fill, full native-TRAIL and MKT completion without cancellation, a timeout that is not reset by later partial progress, immediate cancellation when enabled RTH/data/session/volatility/minimum-price/gap/spread safeguards become unsafe, retry and duplicate suppression, clock-rollback recovery, terminal partial settlement, and complete reconciliation when the remaining shares fill after cancellation was requested.
+
+The historical NBIS replay now proves that the second 28-share print can complete inside the grace without an unnecessary cancellation. Separate focused tests age the persisted first-fill timestamp to exercise the timeout and cancellation-race branches deterministically.
 
 ### Bounded soak tests
 
@@ -95,7 +101,7 @@ The tests check configured deque limits, ATR history limits, price-history limit
 
 ### Sanitized production-incident replay
 
-`tests/test_production_incident_replays.py` uses compact fixtures reduced from the available IREN, NBIS, and VWRA audit evidence. The tests drive production controller, storage, strategy, and adapter-normalization paths for invalid-price rejection, partial-fill cancellation races, late commissions, strict foreign-`OrderRef` isolation, delayed data, broker-valid Stage-3 SELL rounding, and LSE session characterization. `tests/test_v321_incident_gap_fixes.py` verifies the corrected LSE/LSEETF continuous boundary, stable repeated-block throttling, and the distinct `PreflightBlocked` status. `tests/test_incident_fixture_integrity.py` enforces fixture provenance and privacy. See [`PRODUCTION_INCIDENT_REPLAY_TESTS.md`](PRODUCTION_INCIDENT_REPLAY_TESTS.md).
+`tests/test_production_incident_replays.py` uses compact fixtures reduced from the available IREN, NBIS, and VWRA audit evidence. `tests/test_v370_stage3_market_data_guard.py` adds the field-level CHIP cycle-3 incident reconstruction without retaining account-identifying data. The tests drive production controller, storage, strategy, and adapter-normalization paths for invalid-price rejection, BUY multi-print/grace behavior and cancellation races, late commissions, strict foreign-`OrderRef` isolation, delayed data, broker-valid Stage-3 SELL rounding, and LSE session characterization. `tests/test_v321_incident_gap_fixes.py` verifies the corrected LSE/LSEETF continuous boundary, stable repeated-block throttling, and the distinct `PreflightBlocked` status. `tests/test_incident_fixture_integrity.py` enforces fixture provenance and privacy. See [`PRODUCTION_INCIDENT_REPLAY_TESTS.md`](PRODUCTION_INCIDENT_REPLAY_TESTS.md).
 
 ### Safety mutation smoke gate
 
@@ -146,7 +152,7 @@ The complete Windows launcher runs the deterministic layers in this order:
 
 The Unix `scripts/run_tests.sh` helper still separates non-soak coverage from the soak subset to keep that development-host command practical.
 
-The corrected v3.6.0 source tree executed **1,140/1,140** collected pytest cases across isolated coverage partitions with `ResourceWarning` promoted to an error. The combined instrumented run included the ordinary, accelerated-soak, and elapsed-time-bound large-database tests, measured **78.0%** combined statement/branch coverage, and entered **996/996** executable application callables. The release also killed **17/17** targeted safety mutants and passed **58/58** deterministic simulation contracts across 54 CSV price paths. The three former strict expected failures remain ordinary passing regressions.
+The corrected v3.8.0 source tree executed **1,178/1,178** collected pytest cases across all 124 test modules with `ResourceWarning` promoted to an error. The run measured **78.1%** combined statement/branch coverage and entered **1,011/1,011** executable application callables. The release also killed **17/17** targeted safety mutants and passed **58/58** deterministic simulation contracts across 54 CSV price paths. The three former strict expected failures remain ordinary passing regressions.
 
 The CSV matrix itself passes cleanly in the offline Linux environment. The full Windows launcher remains the authoritative combined run for Coverage.py, Ruff, Pyright, and native launcher behavior.
 

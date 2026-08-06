@@ -148,7 +148,7 @@ CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€"}
 ACTIVE_CONTRACT_CURRENCY = "USD"
 CURRENCY_SYMBOL = CURRENCY_SYMBOLS[ACTIVE_CONTRACT_CURRENCY]
 
-APP_VERSION = "3.6.0"
+APP_VERSION = "3.8.0"
 DARK_MODE_APP_PROPERTY = "bouncybotDarkMode"
 
 LIGHT_FUSION_PALETTE_COLORS = {
@@ -5994,7 +5994,7 @@ class CycleAuditDialog(QDialog):
             lines.extend([
                 "BUILT-IN EXAMPLE CYCLE",
                 "=" * 80,
-                "This is synthetic v3.6.0 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
+                "This is synthetic v3.8.0 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
                 "The scenario models a liquid U.S. stock pullback, a multi-execution trailing BUY fill, a temporary protective SELL, and a modest trailing-stop profit exit.",
                 "",
             ])
@@ -6119,7 +6119,7 @@ class MainWindow(QMainWindow):
         self._watchdog_shutdown_expected = False
         auto_restart_value = str(os.environ.get("IBKR_BOT_AUTO_RESTART", "1") or "1").strip().lower()
         self._watchdog_auto_restart_enabled = auto_restart_value not in {"0", "false", "no", "off"}
-        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.6.0")
+        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.8.0")
         icon_path = resource_path("Images", "BouncyBot_app_icon.png")
         if icon_path.is_file():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -8342,14 +8342,14 @@ class MainWindow(QMainWindow):
             (self.max_daily_loss_total_spin, self.max_daily_loss_total_info, f"Blocks new BUY entries after total daily app net P/L reaches this loss. Suggested from amount: {_format_currency(risk_defaults['max_daily_loss_total'], 2)}. {zero_text}"),
             (self.max_cycles_ticker_day_spin, self.max_cycles_info, f"Maximum completed cycles allowed for this ticker in total. Suggested: {risk_defaults['max_cycles_per_ticker_day']}. {zero_text}"),
             (self.max_consecutive_losses_spin, self.max_consecutive_info, f"Blocks new BUY entries after this many consecutive losing completed cycles. Suggested: {risk_defaults['max_consecutive_losses']}. {zero_text}"),
-            (self.max_spread_pct_spin, self.max_spread_info, f"Maximum bid/ask spread percentage before a new BUY can be sent. This field is user-controlled and is never rewritten from live bid/ask data. Current value: {self.max_spread_pct_spin.value():.2f}%. {zero_text}"),
+            (self.max_spread_pct_spin, self.max_spread_info, f"Maximum bid/ask spread percentage for new-BUY preflight and for the normal Stage-3 final-SELL or Stage-3 close-before-RTH quote gate. This field is user-controlled and is never rewritten from live bid/ask data. Current value: {self.max_spread_pct_spin.value():.2f}%. A value of 0 disables only the spread ceiling; Stage 3 still requires a complete, fresh, non-crossed bid/ask pair."),
             (self.min_trade_price_spin, self.min_trade_price_info, f"Minimum permitted sizing price for a new BUY. Suggested: {_format_currency(risk_defaults['min_trade_price'], 2)}. {zero_text}"),
             (self.max_gap_pct_spin, self.max_gap_info, f"Maximum absolute gap from previous close before a new BUY can be sent. Default 0 disables this guard. Suggested: {risk_defaults['max_gap_from_prev_close_pct']:.2f}%. {zero_text}"),
             (self.block_delayed_live_check, self.block_delayed_live_info, "Default ON. Blocks live-profile BUY orders if the API feed is delayed, frozen, or delayed-frozen."),
             (self.what_if_check, self.what_if_info, "Default ON. Runs an IBKR what-if margin/buying-power pre-check before the real BUY order is submitted."),
-            (self.stale_data_guard_check, self.stale_data_info, "Default ON. Blocks new BUY entries when selected price, bid/ask, or RTH status is stale."),
-            (self.max_price_age_spin, self.max_price_age_info, f"Maximum selected-price age when stale-data guard is enabled. Current value {self.max_price_age_spin.value():.1f}s."),
-            (self.max_bidask_age_spin, self.max_bidask_age_info, f"Maximum bid/ask age when stale-data guard is enabled. Current value {self.max_bidask_age_spin.value():.1f}s."),
+            (self.stale_data_guard_check, self.stale_data_info, "Default ON. Blocks new BUY entries when the selected price basis, bid/ask, or RTH status is stale. Stage 3 additionally verifies bid and ask independently before arming a normal final SELL."),
+            (self.max_price_age_spin, self.max_price_age_info, f"Maximum age of the selected price's actual underlying field or quote basis when stale-data guard is enabled. Current value {self.max_price_age_spin.value():.1f}s."),
+            (self.max_bidask_age_spin, self.max_bidask_age_info, f"Maximum bid/ask age when stale-data guard is enabled. In Stage 3, bid and ask must each satisfy this limit independently. Current value {self.max_bidask_age_spin.value():.1f}s."),
             (self.max_rth_age_spin, self.max_rth_age_info, f"Maximum RTH status age when stale-data guard is enabled. Current value {self.max_rth_age_spin.value():.1f}s."),
             (self.volatility_filter_check, self.volatility_filter_info, "Default OFF. Check to block new BUY entries when app-observed recent price movement exceeds the configured maximum."),
             (self.volatility_window_spin, self.volatility_window_info, f"Recent price observation window. Current value {self.volatility_window_spin.value()} seconds."),
@@ -8361,12 +8361,12 @@ class MainWindow(QMainWindow):
             (
                 self.cancel_sell_and_liquidate_before_close_check,
                 self.cancel_sell_and_liquidate_before_close_info,
-                "Default OFF. In Stage 3, at the configured time before the contract's RTH close, the app submits one DAY market SELL only when the selected current price is strictly above the average BUY fill price; commissions are ignored for that comparison. If a protective SELL is working, it is cancelled and confirmed terminal first. In Stage 4, the app cancels the final SELL trailing-stop, waits for a terminal broker status, and then market-sells only the remaining app-owned shares. A market fill can be below the checked price or trailing stop and can still realize a loss. No outside-RTH replacement is submitted.",
+                "Default OFF. In Stage 3, at the configured time before the contract's RTH close, the app submits one DAY market SELL only from a complete, fresh, non-crossed bid/ask quote within Max spread %, with the executable bid strictly above the average BUY fill price; commissions are ignored for that comparison. The quote is revalidated before intent and again before broker submission. If a protective SELL is working, it is cancelled and confirmed terminal first. In Stage 4, the app cancels the final SELL trailing-stop, waits for a terminal broker status, and then market-sells only the remaining app-owned shares. A market fill can be below the checked bid or trailing stop and can still realize a loss. No outside-RTH replacement is submitted.",
             ),
             (
                 self.liquidate_before_close_spin,
                 self.liquidate_before_close_info,
-                f"Start the close-before-RTH workflow {self.liquidate_before_close_spin.value()} minutes before the contract's RTH close. Stage 3 requires the selected current price to be strictly above the average BUY price. Stage 4 uses cancel-confirm-replace for the final SELL trail. Choose enough time for IBKR to confirm any cancellation and fill the market order before the session ends. Default 5 minutes; range 1-240 minutes.",
+                f"Start the close-before-RTH workflow {self.liquidate_before_close_spin.value()} minutes before the contract's RTH close. Stage 3 requires a complete fresh spread-checked quote and an executable bid strictly above the average BUY price. Stage 4 uses cancel-confirm-replace for the final SELL trail. Choose enough time for IBKR to confirm any cancellation and fill the market order before the session ends. Default 5 minutes; range 1-240 minutes.",
             ),
         ]
         for widget, info, text in tooltips:

@@ -10,9 +10,10 @@ The committed fixtures cover six observed incidents:
    - preserves `ContractDetails.minTick=0.0001`, SMART market rule 557, the applicable one-cent price band, the malformed historical what-if response, and the broker's invalid-price rejection;
    - verifies market-rule normalization, BUY-up rounding, strict what-if validation, broker-error retention, and the structural-rejection circuit breaker.
 
-2. **NBIS partial-fill cancellation race**
-   - preserves two 28-share BUY executions, the cancellation between them, and late commissions;
-   - verifies that Stage 2 remains active until the original BUY is terminal, all 56 shares are reconciled, commissions are idempotent, and the app-owned unsold quantity is correct.
+2. **NBIS partial-fill multi-print/cancellation race**
+   - preserves two 28-share BUY executions and late commissions from the original incident shape;
+   - verifies that v3.8.0 does not cancel on the first partial during the fixed completion grace, Stage 2 remains active until the original BUY is terminal, all 56 shares are reconciled, commissions are idempotent, and the app-owned unsold quantity is correct;
+   - separate controller regressions age the same persisted first-fill clock beyond the grace, request one remainder cancellation, and prove that later fills during that cancellation race are still included.
 
 3. **Cross-instance Master-client callbacks**
    - preserves foreign NBIS/LAC commission and order-error callback shapes while the local cycle is IREN;

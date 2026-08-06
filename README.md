@@ -4,7 +4,7 @@
   <img src="Images/BouncyBot_logo.png" alt="BouncyBot logo" width="640" />
 </p>
 
-**Current release: v3.6.0**
+**Current release: v3.8.0**
 
 ![Simple-view](Images/Trading-Simple-view.png)
 
@@ -80,7 +80,7 @@ quantity = floor(budget / sizing price)
 
 The sizing price is the projected BUY stop, optionally increased by the configured planning-only slippage buffer. A positive BUY trail creates a native IBKR `TRAIL` order. A zero BUY trail creates a market BUY immediately after the drop condition.
 
-When a positive BUY quantity fills, the application requests cancellation of any unfilled remainder but keeps Stage 2 active until the original BUY order reaches a terminal broker status. It continuously reconciles cumulative fills during the cancellation race, so a second partial fill cannot be omitted from the app-owned quantity, average price, commissions, later SELL sizing, or P/L. Execution and commission callbacks are applied idempotently by IBKR execution ID, including callbacks that arrive after order polling or reconnect.
+When a positive BUY quantity first fills, the triggered marketable order is allowed **3.0 seconds** to finish normally. If it remains nonterminal after that grace period, or if a configured market/session safety condition becomes unsafe, the application requests cancellation of the unfilled remainder once. Stage 2 remains active until the original BUY order is terminal, and all additional fills received before or during cancellation are reconciled into the app-owned quantity, weighted average price, commissions, later SELL sizing, and P/L. Execution and commission callbacks are applied idempotently by IBKR execution ID, including callbacks that arrive after order polling or reconnect.
 
 ### Stage 3 — wait for minimum profit
 
@@ -91,9 +91,9 @@ minimum initial SELL stop = average BUY fill × (1 + minimum profit % / 100)
 required last price = minimum initial SELL stop / (1 - SELL trail % / 100)
 ```
 
-The final SELL is not submitted until the selected strategy price reaches the required level. This is a gross planning threshold before commissions and actual market-order slippage; it is not a profit guarantee.
+The final SELL is not submitted merely because a selected convenience price reaches the required level. The current bid and ask must each be independently fresh, complete, non-crossed, and within the configured maximum spread; the executable SELL-side bid must confirm the rise trigger on two consecutive distinct quote updates. The same quote identity is revalidated immediately before the durable order intent and again immediately before broker submission. A stale Last exposed by a different ticker-field update cannot arm the exit. This remains a gross planning threshold before commissions and actual market-order slippage; it is not a profit guarantee.
 
-When **Cancel SELL trail and liquidate before close** is enabled, Stage 3 also evaluates the configured cutoff. It submits an RTH-only `DAY` market SELL only when the selected current price is strictly above the actual average BUY fill price; commissions are intentionally ignored for this comparison. If a protective SELL is still working, the app cancels it and waits for a terminal broker status before submitting the market order. The price test occurs before submission and cannot guarantee that the eventual market fill remains profitable.
+When **Cancel SELL trail and liquidate before close** is enabled, Stage 3 also evaluates the configured cutoff. It submits an RTH-only `DAY` market SELL only when a fresh complete spread-checked quote is available and the current bid is strictly above the actual average BUY fill price; commissions are intentionally ignored for this comparison. If a protective SELL is still working, the app cancels it and waits for a terminal broker status before submitting the market order. The quote test occurs before submission and cannot guarantee that the eventual market fill remains profitable.
 
 ### Stage 4 — manage the exit
 
@@ -187,7 +187,7 @@ A running Gateway can retain the local socket while its Internet/server connecti
 - **2103/2104:** invalidate quote freshness when a market-data farm disconnects or reports restored, then require the next actual ticker event before showing the feed as live again;
 - **1300:** treat the API socket-port reset as unavailable and require a normal local reconnect.
 
-Freshness is based on actual `ib_async` `pendingTickersEvent` deliveries. Re-reading a `Ticker` object whose bid, ask, or last fields are still populated does not refresh the quote age, advance Stage 1 or Stage 3, or add an ATR/volatility observation. Quote age is also re-evaluated on every GUI snapshot, so a formerly green indicator changes to stale even when the worker temporarily performs no new quote read. The fields may remain visible for diagnosis, but they are marked cached-only, invalidated, or stale and are not tradeable. The callback arrival time, rather than the later GUI/controller read time, is used for quote age and ATR bucketing. If the supported adapter cannot register the ticker-update event at all, market data fails closed instead of reverting to cached-field freshness.
+Freshness is based on actual `ib_async` `pendingTickersEvent` deliveries and, within each delivery, on the raw price field that actually updated. Bid, ask, and Last have independent update/change sequences and callback times. Re-reading a `Ticker` object whose fields remain populated does not refresh their ages. A bid-size, ask-size, Last-size, or timestamp event cannot make an unchanged price field fresh, while a same-price bid/ask/trade price tick remains a valid field update. The selected `marketPrice` is traced back to its Last, quote, mark, or close basis, so an unchanged cached Last exposed when one quote side disappears cannot advance the strategy or enter ATR. Quote age is re-evaluated on every GUI snapshot, so a formerly green indicator changes to stale even when the worker temporarily performs no new quote read. Fields may remain visible for diagnosis, but cached, invalidated, or stale values are not tradeable. If the supported adapter cannot register ticker events or field-level evidence, the affected trading path fails closed.
 
 After upstream restoration, normal processing remains paused until the application has reconciled app-owned open orders and recent executions. Native orders already accepted by IBKR are not automatically cancelled solely because connectivity is lost; their status and fills are imported during recovery when broker facts become available.
 
@@ -472,7 +472,7 @@ dist\IBKRTradingBot\IBKRTradingBot.exe
 and creates the versioned release folder and final ZIP using the same naming pattern as IBKR Market Replay Lab:
 
 ```text
-release\IBKRTradingBot_3.6.0_Windows\
+release\IBKRTradingBot_3.8.0_Windows\
   BouncyBot.lnk
   GUI\IBKRTradingBot.exe
   docs\
@@ -482,7 +482,7 @@ release\IBKRTradingBot_3.6.0_Windows\
   SECURITY.md
   QUICK_START.txt
 
-release\IBKRTradingBot_3.6.0_Windows.zip
+release\IBKRTradingBot_3.8.0_Windows.zip
 release\SHA256SUMS.txt
 ```
 
@@ -555,7 +555,9 @@ Superseded release-specific documents are indexed under [docs/legacy](docs/legac
 
 ## Release history
 
-- [v3.6.0 release note](docs/V3_6_0_SELL_RECONCILIATION_AND_HISTORY_ROBUSTNESS.md) — exact aggregate final-SELL settlement, fail-closed quantity mismatches, numeric Trade History sorting, and operator-visible audit/export failures.
+- [v3.8.0 release note](docs/V3_8_0_BUY_PARTIAL_FILL_GRACE.md) — three-second marketable-BUY partial-fill grace, timeout cancellation, immediate market/session safety cancellation, restart-safe timing, and focused regressions.
+- [v3.7.0 release note](docs/legacy/V3_7_0_FIELD_LEVEL_MARKET_DATA_AND_STAGE3_SELL_GUARD.md) — per-field bid/ask/Last freshness, two-quote executable-bid confirmation, Stage-3 spread enforcement, pre-submit revalidation, and stale-Last ATR exclusion.
+- [v3.6.0 release note](docs/legacy/V3_6_0_SELL_RECONCILIATION_AND_HISTORY_ROBUSTNESS.md) — exact aggregate final-SELL settlement, fail-closed quantity mismatches, numeric Trade History sorting, and operator-visible audit/export failures.
 - [v3.5.0 release note](docs/legacy/V3_5_0_GUI_LIGHT_MODE_AND_LAYOUT.md) — price-monitor-first Advanced layout, light-mode startup, and reliable workflow-button state after theme switching.
 - [v3.4.0 release note](docs/legacy/V3_4_0_RELIABILITY_AND_RECOVERY_FIXES.md) — exact protective-SELL completion gates, quoted Windows watchdog replacement, bounded capture shutdown, deterministic recovery state, and lockfile hardening.
 - [v3.3.0 release note](docs/legacy/V3_3_0_DARK_MODE_AUDIT_AND_WINDOWS_RELEASE.md) — automatic/manual Fusion themes, corrected audit layouts, Windows packaging, fail-closed worker/storage supervision, and authenticated full-process automatic recovery.
