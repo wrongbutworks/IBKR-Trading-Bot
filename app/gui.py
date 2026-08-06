@@ -148,7 +148,7 @@ CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€"}
 ACTIVE_CONTRACT_CURRENCY = "USD"
 CURRENCY_SYMBOL = CURRENCY_SYMBOLS[ACTIVE_CONTRACT_CURRENCY]
 
-APP_VERSION = "3.8.0"
+APP_VERSION = "3.9.0"
 DARK_MODE_APP_PROPERTY = "bouncybotDarkMode"
 
 LIGHT_FUSION_PALETTE_COLORS = {
@@ -4379,6 +4379,12 @@ class PricePanel(QGroupBox):
         self.progress_bar.setValue(0)
         root.addWidget(self.progress_label)
         root.addWidget(self.progress_bar)
+        self.stage3_guard_status = QLabel("")
+        self.stage3_guard_status.setObjectName("PriceGuardStatus")
+        self.stage3_guard_status.setWordWrap(True)
+        self.stage3_guard_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.stage3_guard_status.setVisible(False)
+        root.addWidget(self.stage3_guard_status)
 
         summary_grid = QGridLayout()
         self.price_summary_cards: dict[str, MetricCard] = {}
@@ -4651,6 +4657,43 @@ class PricePanel(QGroupBox):
             self.api_indicator_text.setToolTip(tooltip)
 
     def _update_progress(self, cycle: Optional[dict[str, Any]], price: Any, price_snapshot: Optional[dict[str, Any]] = None) -> None:
+        stage = cycle.get("stage") if cycle else None
+        guard = dict((price_snapshot or {}).get("stage3_sell_quote_status") or {})
+        if hasattr(self, "stage3_guard_status"):
+            visible = bool(stage == Stage.WAIT_RISE_TRIGGER.value and guard)
+            self.stage3_guard_status.setVisible(visible)
+            if visible:
+                guard_state = str(guard.get("state") or "waiting")
+                message = str(guard.get("message") or "Waiting for quote evidence.")
+                reason_code = str(guard.get("reason_code") or "")
+                bid = _float_or_none(guard.get("bid"))
+                trigger = _float_or_none(guard.get("trigger_price"))
+                distance = _float_or_none(guard.get("trigger_distance_pct"))
+                if guard_state == "blocked":
+                    prefix = "Stage 3 SELL evidence: Waiting"
+                    if reason_code:
+                        prefix += f" [{reason_code}]"
+                elif guard_state == "waiting_quote_update":
+                    prefix = "Stage 3 SELL evidence: Waiting for the next quote update"
+                elif guard_state == "waiting_below_trigger":
+                    prefix = "Stage 3 SELL evidence: Quote valid; trigger not reached"
+                elif guard_state == "confirmation_pending":
+                    prefix = "Stage 3 SELL evidence: First confirmation accepted"
+                elif guard_state == "confirmed":
+                    prefix = "Stage 3 SELL evidence: Trigger confirmed"
+                else:
+                    prefix = "Stage 3 SELL evidence"
+                details: list[str] = []
+                if bid is not None:
+                    details.append(f"executable bid {_format_price(bid)}")
+                if trigger is not None:
+                    details.append(f"trigger {_format_price(trigger)}")
+                if distance is not None:
+                    details.append(f"distance {distance:+.2f}%")
+                suffix = f" ({'; '.join(details)})" if details else ""
+                guard_text = f"{prefix}: {message}{suffix}"
+                if self.stage3_guard_status.text() != guard_text:
+                    self.stage3_guard_status.setText(guard_text)
         if not cycle or price is None:
             self.progress_label.setText("Strategy progress: waiting for a usable price")
             self.progress_bar.setValue(0)
@@ -4661,7 +4704,6 @@ class PricePanel(QGroupBox):
             self.progress_label.setText("Strategy progress: price unavailable")
             self.progress_bar.setValue(0)
             return
-        stage = cycle.get("stage")
         if stage == Stage.WAIT_INITIAL_DROP.value:
             anchor = cycle.get("anchor_price")
             trigger = cycle.get("drop_trigger_price")
@@ -4727,6 +4769,12 @@ class PricePanel(QGroupBox):
             ("Displayed initial stop", native_diag.get("displayed_initial_stop") if native_diag.get("active") else "-"),
             ("Selected crossed stop", native_diag.get("selected_crossed_displayed_initial_stop") if native_diag.get("active") else "-"),
             ("Raw last crossed stop", native_diag.get("raw_last_crossed_displayed_initial_stop") if native_diag.get("active") else "-"),
+            ("Stage 3 SELL evidence state", (price_snapshot.get("stage3_sell_quote_status") or {}).get("state") or "-"),
+            ("Stage 3 SELL evidence reason", (price_snapshot.get("stage3_sell_quote_status") or {}).get("reason_code") or "-"),
+            ("Stage 3 SELL evidence detail", (price_snapshot.get("stage3_sell_quote_status") or {}).get("message") or "-"),
+            ("Stage 3 SELL trigger distance %", (price_snapshot.get("stage3_sell_quote_status") or {}).get("trigger_distance_pct")),
+            ("Stage 3 SELL observations", (price_snapshot.get("stage3_sell_quote_status") or {}).get("occurrence_count")),
+            ("Stage 3 SELL suppressed audit rows", (price_snapshot.get("stage3_sell_quote_status") or {}).get("suppressed_count")),
             ("Requested mode", requested_label),
             ("Auto selected mode", selected_label),
             ("Actual mode", actual_label),
@@ -5994,7 +6042,7 @@ class CycleAuditDialog(QDialog):
             lines.extend([
                 "BUILT-IN EXAMPLE CYCLE",
                 "=" * 80,
-                "This is synthetic v3.8.0 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
+                "This is synthetic v3.9.0 paper-trading example data. It is not an actual market record, is not stored in SQLite, and cannot affect trading or risk totals.",
                 "The scenario models a liquid U.S. stock pullback, a multi-execution trailing BUY fill, a temporary protective SELL, and a modest trailing-stop profit exit.",
                 "",
             ])
@@ -6119,7 +6167,7 @@ class MainWindow(QMainWindow):
         self._watchdog_shutdown_expected = False
         auto_restart_value = str(os.environ.get("IBKR_BOT_AUTO_RESTART", "1") or "1").strip().lower()
         self._watchdog_auto_restart_enabled = auto_restart_value not in {"0", "false", "no", "off"}
-        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.8.0")
+        self.setWindowTitle("BouncyBot - IBKR Portable Trading Bot v3.9.0")
         icon_path = resource_path("Images", "BouncyBot_app_icon.png")
         if icon_path.is_file():
             self.setWindowIcon(QIcon(str(icon_path)))

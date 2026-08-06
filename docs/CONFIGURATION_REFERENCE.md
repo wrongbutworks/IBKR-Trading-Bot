@@ -1,6 +1,6 @@
 # Configuration reference
 
-This document describes the persisted connection and strategy settings in v3.8.0. Values shown as defaults are the dataclass defaults used for a new configuration. Saved SQLite settings override them after the first run.
+This document describes the persisted connection and strategy settings in v3.9.0. Values shown as defaults are the dataclass defaults used for a new configuration. Saved SQLite settings override them after the first run.
 
 ## Connection settings
 
@@ -57,7 +57,7 @@ A non-zero commission in the database currency is included in net P/L. A non-zer
 
 When ATR adaptation supplies a valid value, it rewrites the order-driving percentages used by the same strategy path. Manual values remain the saved fallback/configuration values and continue to apply to fields whose ATR toggle is off.
 
-When a marketable BUY reports a positive partial fill, BouncyBot uses a fixed runtime-only 3.0-second grace period before requesting cancellation of the remainder. This duration is not a GUI or SQLite setting in v3.8.0. The grace is bypassed when an enabled market/session safety check becomes unsafe, including RTH/data/session/volatility checks and configured minimum-price, gap, or spread limits. The timer starts at the first persisted positive fill and is not extended by later partial executions.
+When a marketable BUY reports a positive partial fill, BouncyBot uses a fixed runtime-only 3.0-second grace period before requesting cancellation of the remainder. This duration is not a GUI or SQLite setting; it was introduced in v3.8.0. The grace is bypassed when an enabled market/session safety check becomes unsafe, including RTH/data/session/volatility checks and configured minimum-price, gap, or spread limits. The timer starts at the first persisted positive fill and is not extended by later partial executions.
 
 
 ## ATR-adaptive settings
@@ -171,6 +171,18 @@ The hard-risk master is off by default. When it is on, a zero value disables the
 | Maximum gap from previous close | `0` | Absolute percentage gap. Set zero to disable. |
 
 Hard BUY limits do not prevent an already-open application-owned position from being sold. SELL eligibility still depends on broker connection, valid state, RTH/order constraints, and cancellation sequencing.
+
+
+## Audit diagnostic cadence (runtime only)
+
+The v3.9.0 audit coalescer has no GUI control and no persisted setting. It changes only how repeated operational observations are written to SQLite; it does not change when a guard is evaluated or when trading is blocked. Current Stage-3 quote evidence remains visible in the Price Data Monitor.
+
+- Stage-3 quote, BUY-preflight, reconnect, and session conditions first summarize after 60 seconds and then at most every 300 seconds while persistent.
+- A normal unchanged native trailing order first summarizes after 900 seconds and then at most every 900 seconds.
+- Near-trigger invalid Stage-3 evidence, invalidated SELL confirmation, reconnect-outage entry, and native-stop diagnostic crossings remain immediate.
+- Safety-critical errors and decision events are not routed through this coalescer.
+
+Condition state is in memory and resets on a complete process restart. The restart may therefore create a new condition-entry event for a still-active state.
 
 ## Runtime-only cycle fields
 

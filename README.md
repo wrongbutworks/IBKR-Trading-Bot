@@ -4,7 +4,7 @@
   <img src="Images/BouncyBot_logo.png" alt="BouncyBot logo" width="640" />
 </p>
 
-**Current release: v3.8.0**
+**Current release: v3.9.0**
 
 ![Simple-view](Images/Trading-Simple-view.png)
 
@@ -128,6 +128,7 @@ The application records fills, commissions received from IBKR, gross and net P/L
 - Atomic resume checkpoints for normal exits and controlled Windows update/sign-out/shutdown requests.
 - Single-instance lock to reduce the risk of two copies using the same database and API client configuration.
 - UTC audit timestamps throughout the application, with live receipt time and broker-decoded execution time preserved separately.
+- Stateful audit diagnostics that use stable reason codes, suppress cadence-level duplicates, retain structured occurrence/maximum evidence, and emit bounded persistence summaries plus recovery events while the Price Data Monitor shows the current Stage-3 quote guard continuously.
 - CSV trade-history export and diagnostic audit bundles.
 - BouncyBot application branding and an **About > Info** screen with the project repository, referral link, and copyable support addresses.
 
@@ -197,7 +198,7 @@ The controller evaluates configured blockers before a BUY is transmitted. The to
 
 The regular-session open/close window comes from the exact qualified IBKR contract's date-specific `liquidHours` and `timeZoneId`. For `LSE` and `LSEETF`, BouncyBot intersects that broker window with the verified 08:00-16:30 `Europe/London` continuous session, so ordinary timing-sensitive orders do not use a later auction/post-continuous `liquidHours` endpoint. An IBKR holiday or earlier close still wins. The same effective boundaries drive the first-minutes, last-minutes, cancel-before-close, and RTH-only ATR controls. The weekday 09:30-16:00 New York fallback is retained only for recognized U.S. equity primary exchanges. A non-U.S. contract with missing or invalid session metadata fails closed instead of inheriting U.S. hours.
 
-When a BUY is prevented before any live order is submitted, the cycle now records `PreflightBlocked` rather than `SubmitFailed`. Repeated unchanged preflight warnings for the same cycle and blocker category are written to the audit log at most once per 60 seconds; the guard itself is still evaluated and enforced on every strategy cadence.
+When a BUY is prevented before any live order is submitted, the cycle records `PreflightBlocked` rather than `SubmitFailed`. Persistent preflight, reconnect, Stage-3 quote-evidence, close-before-RTH, and native-order waiting conditions are coalesced into a condition-entry event, bounded periodic summaries, and one recovery event instead of one SQLite audit row per controller cadence. The safeguards themselves remain evaluated and enforced on every cadence, and safety-critical rejections, quantity mismatches, worker/storage faults, reconciliation failures, and confirmed pre-submission SELL revalidation failures remain immediate.
 
 - a disconnected local API socket, lost Gateway-to-IBKR server link, or incomplete post-reconnect reconciliation;
 - no actual post-connect/post-recovery ticker event, or missing, invalid, cached-only, or stale selected price;
@@ -472,7 +473,7 @@ dist\IBKRTradingBot\IBKRTradingBot.exe
 and creates the versioned release folder and final ZIP using the same naming pattern as IBKR Market Replay Lab:
 
 ```text
-release\IBKRTradingBot_3.8.0_Windows\
+release\IBKRTradingBot_3.9.0_Windows\
   BouncyBot.lnk
   GUI\IBKRTradingBot.exe
   docs\
@@ -482,7 +483,7 @@ release\IBKRTradingBot_3.8.0_Windows\
   SECURITY.md
   QUICK_START.txt
 
-release\IBKRTradingBot_3.8.0_Windows.zip
+release\IBKRTradingBot_3.9.0_Windows.zip
 release\SHA256SUMS.txt
 ```
 
@@ -555,7 +556,8 @@ Superseded release-specific documents are indexed under [docs/legacy](docs/legac
 
 ## Release history
 
-- [v3.8.0 release note](docs/V3_8_0_BUY_PARTIAL_FILL_GRACE.md) — three-second marketable-BUY partial-fill grace, timeout cancellation, immediate market/session safety cancellation, restart-safe timing, and focused regressions.
+- [v3.9.0 release note](docs/V3_9_0_AUDIT_DIAGNOSTIC_COALESCING.md) — stable diagnostic reason codes, bounded condition summaries, recovery events, quieter reconnect/native-order waits, and live Stage-3 quote-evidence status in the Price Data Monitor.
+- [v3.8.0 release note](docs/legacy/V3_8_0_BUY_PARTIAL_FILL_GRACE.md) — three-second marketable-BUY partial-fill grace, timeout cancellation, immediate market/session safety cancellation, restart-safe timing, and focused regressions.
 - [v3.7.0 release note](docs/legacy/V3_7_0_FIELD_LEVEL_MARKET_DATA_AND_STAGE3_SELL_GUARD.md) — per-field bid/ask/Last freshness, two-quote executable-bid confirmation, Stage-3 spread enforcement, pre-submit revalidation, and stale-Last ATR exclusion.
 - [v3.6.0 release note](docs/legacy/V3_6_0_SELL_RECONCILIATION_AND_HISTORY_ROBUSTNESS.md) — exact aggregate final-SELL settlement, fail-closed quantity mismatches, numeric Trade History sorting, and operator-visible audit/export failures.
 - [v3.5.0 release note](docs/legacy/V3_5_0_GUI_LIGHT_MODE_AND_LAYOUT.md) — price-monitor-first Advanced layout, light-mode startup, and reliable workflow-button state after theme switching.

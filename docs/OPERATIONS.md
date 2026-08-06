@@ -1,6 +1,6 @@
 # Operations guide
 
-This guide describes the normal operator workflow for v3.8.0. It does not replace the broker’s API documentation or account controls.
+This guide describes the normal operator workflow for v3.9.0. It does not replace the broker’s API documentation or account controls.
 
 ## Before starting
 
@@ -73,6 +73,21 @@ Monitor:
 The top lock button is an accidental-edit guard. When engaged, editable settings and all five workflow buttons are disabled. It does not stop the worker or cancel an order.
 
 Simple, Advanced, and Debug modes all show **Recovery / audit log** across the full dashboard width. The removed duplicate Controls panel is not needed because the fixed five-button command bar remains visible.
+
+
+## Audit-condition summaries
+
+v3.9.0 keeps persistent routine conditions visible without writing one SQLite row for every controller cadence. Stage-3 quote evidence is shown continuously in the Price Data Monitor. Reconnect, BUY-preflight, close-before-RTH, and native trailing-order waits use a condition-entry event, bounded persistence summaries, and one recovery event.
+
+Operational cadence is intentionally different by condition:
+
+- Stage-3 quote-evidence safety conditions: one INFO entry for the routine condition, first WARN summary after one minute, then at most every five minutes; near-trigger or confirmation-invalidating failures remain immediate WARN;
+- expected BUY/session waits such as RTH closed or ATR warmup: immediate INFO, first INFO summary after 15 minutes, then at most every 15 minutes; hard risk/data/broker blockers use immediate WARN, a one-minute first WARN summary, then five-minute WARN summaries;
+- reconnect outage: immediate WARN, first persistence summary after one minute as INFO, then at most every five minutes as WARN;
+- normal unchanged native trailing order: INFO summary after 15 minutes and then at most every 15 minutes;
+- selected-price/raw-Last native-stop anomalies: immediate event plus bounded anomaly summaries.
+
+A reduction in audit rows does not mean a guard is evaluated less often. Trading safeguards still run on every normal cadence. Order rejections, terminal partials, quantity mismatches, storage/worker faults, reconciliation uncertainty, and failed confirmed-SELL revalidation remain immediate. The structured raw JSON attached to condition summaries records counts, duration, latest context, reason distribution, and maximum observed numeric metrics.
 
 ## Expected pauses versus recovery errors
 
@@ -193,7 +208,7 @@ After any outage or restart:
 
 ATR observation history is in-memory only and starts empty after an application or Windows restart. A stale active cycle is intentionally held for explicit reconciliation. The recovery probe itself is point-in-time: normal terminal order polls can retire an older matching probe row; after any TWS-side change, use **Refresh from IBKR/TWS** to obtain a newer authoritative probe.
 
-## v3.8.0 paper-account validation
+## v3.9.0 paper-account validation
 
 Before unattended live use, reproduce the Stage-2 partial-BUY and field-level Stage-3 gates in paper mode with a liquid and a thinly traded instrument:
 

@@ -1,6 +1,6 @@
 # Deterministic offline behavior tests
 
-This document describes the current non-GUI, non-Windows, non-network test layer in v3.8.0. It covers strategy behavior, controller state transitions, BUY partial-fill grace/timeout safety, broker-event handling, persistence and recovery, shutdown checkpoints, GUI contracts, and bounded performance behavior.
+This document describes the current non-GUI, non-Windows, non-network test layer in v3.9.0. It covers strategy behavior, controller state transitions, audit diagnostic coalescing, BUY partial-fill grace/timeout safety, broker-event handling, persistence and recovery, shutdown checkpoints, GUI contracts, and bounded performance behavior.
 
 The suite deliberately avoids:
 
@@ -81,6 +81,10 @@ The deterministic assertions verify that:
 - subscription replacement/retention follows the restoration mode;
 - a final connectivity check prevents a late-race order submission.
 
+### v3.9.0 audit-condition coalescing sequences
+
+`tests/test_v390_audit_diagnostic_coalescing.py` drives the real controller and headless Price Data Monitor through persistent diagnostic conditions. It verifies stable reason-based keys, bounded entry/summary/recovery events, changing-age suppression, a 705-observation NBIS-style stale-ask sequence, GUI-only non-price callbacks, immediate near-trigger invalid evidence, native-order normal/anomaly cadence, reconnect aggregation/recovery, BUY-preflight recovery, and live Stage-3 status rendering. The tests assert that every source observation remains counted while SQLite event production stays bounded and all existing trading guards continue to run.
+
 ### v3.8.0 BUY partial-fill grace and cancellation sequences
 
 `tests/test_v380_buy_partial_fill_grace.py` drives real controller, strategy, storage, and deterministic broker boundaries through the revised Stage-2 policy. It verifies a fixed 3.0-second grace from the first positive fill, full native-TRAIL and MKT completion without cancellation, a timeout that is not reset by later partial progress, immediate cancellation when enabled RTH/data/session/volatility/minimum-price/gap/spread safeguards become unsafe, retry and duplicate suppression, clock-rollback recovery, terminal partial settlement, and complete reconciliation when the remaining shares fill after cancellation was requested.
@@ -125,7 +129,7 @@ The gate currently requires tests to kill seventeen safety mutations:
 14. allowing a late zero commission to erase an already recorded non-zero commission;
 15. moving the verified LSE continuous close from 16:30 to 16:50 London;
 16. relabelling a local BUY preflight block as `SubmitFailed`; and
-17. suppressing the first throttled warning when monotonic time starts at zero.
+17. suppressing the first throttled/coalesced warning when monotonic time starts at zero.
 
 A surviving mutant fails the validation run.
 
@@ -152,7 +156,7 @@ The complete Windows launcher runs the deterministic layers in this order:
 
 The Unix `scripts/run_tests.sh` helper still separates non-soak coverage from the soak subset to keep that development-host command practical.
 
-The corrected v3.8.0 source tree executed **1,178/1,178** collected pytest cases across all 124 test modules with `ResourceWarning` promoted to an error. The run measured **78.1%** combined statement/branch coverage and entered **1,011/1,011** executable application callables. The release also killed **17/17** targeted safety mutants and passed **58/58** deterministic simulation contracts across 54 CSV price paths. The three former strict expected failures remain ordinary passing regressions.
+The v3.9.0 source tree executed **1,211/1,211** collected pytest cases across all 126 test modules with `ResourceWarning` promoted to an error. Every test module also passed in a separate fresh pytest process. The run measured **78.1%** combined statement/branch coverage and entered **1,024/1,024** executable application callables. The release also killed **17/17** targeted safety mutants and passed **58/58** deterministic simulation contracts across 54 CSV price paths. The three former strict expected failures remain ordinary passing regressions.
 
 The CSV matrix itself passes cleanly in the offline Linux environment. The full Windows launcher remains the authoritative combined run for Coverage.py, Ruff, Pyright, and native launcher behavior.
 

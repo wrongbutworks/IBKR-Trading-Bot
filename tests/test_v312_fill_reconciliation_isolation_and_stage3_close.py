@@ -504,7 +504,7 @@ def test_exact_historical_order_ref_updates_its_cycle_not_current_cycle(tmp_path
     assert controller.active_cycle.id == current.id
 
 
-def test_native_trailing_diagnostic_uses_stable_throttle_key(tmp_path, monkeypatch) -> None:
+def test_native_trailing_diagnostic_uses_stable_coalescing_key(tmp_path, monkeypatch) -> None:
     controller, _broker = _controller(tmp_path, monkeypatch)
     cycle = StrategyEngine.start_cycle(controller.strategy, 1, "SIM", 100.0, 0.0)
     cycle.stage = Stage.SELL_TRAIL_ACTIVE
@@ -519,7 +519,9 @@ def test_native_trailing_diagnostic_uses_stable_throttle_key(tmp_path, monkeypat
             "side": "SELL",
             "selected_price": 104.01,
             "raw_last_value": 104.00,
-            "displayed_initial_stop": 103.00,
+            "displayed_initial_stop": 105.00,
+            "selected_crossed_displayed_initial_stop": False,
+            "raw_last_crossed_displayed_initial_stop": False,
             "message": "waiting",
         }
     }
@@ -528,10 +530,10 @@ def test_native_trailing_diagnostic_uses_stable_throttle_key(tmp_path, monkeypat
     controller.price_snapshot["native_order_trigger"]["raw_last_value"] = 104.01
     controller._log_native_order_wait_diagnostic(cycle, "Submitted")
 
-    assert len(messages) == 1
-    assert len(controller._last_price_warning_at) == 1
-    key = next(iter(controller._last_price_warning_at))
-    assert cycle.sell_order_ref in key
+    assert messages == []
+    key = f"native_trailing_wait|{cycle.id}|SELL|{cycle.sell_order_ref}"
+    assert controller._audit_conditions[key]["occurrence_count"] == 2
+    assert controller._last_price_warning_at == {}
 
 
 def test_execution_timestamp_prefers_live_receipt_and_preserves_broker_time() -> None:

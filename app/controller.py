@@ -152,6 +152,10 @@ class TradingController:
     BUY_PREFLIGHT_AUDIT_THROTTLE_SECONDS = 60.0
     STORAGE_FAULT_PROBE_INTERVAL_SECONDS = 2.0
     STAGE3_SELL_CONFIRMATIONS_REQUIRED = 2
+    DIAGNOSTIC_FIRST_SUMMARY_SECONDS = 60.0
+    DIAGNOSTIC_REPEAT_SUMMARY_SECONDS = 5.0 * 60.0
+    NATIVE_ORDER_WAIT_SUMMARY_SECONDS = 15.0 * 60.0
+    STAGE3_NEAR_TRIGGER_PCT = 0.5
     # A positive partial fill proves that a native TRAIL BUY has triggered, or
     # that a zero-trail MKT BUY is executing. Allow normal multi-print marketable
     # execution a brief chance to finish before cancelling the working remainder.
@@ -216,6 +220,13 @@ class TradingController:
         self._pending_commissions_by_execution_id: dict[str, dict[str, Any]] = {}
         self._commission_currency_mismatch_keys: set[str] = set()
         self._last_price_warning_at: dict[str, float] = {}
+        self._audit_conditions: dict[str, dict[str, Any]] = {}
+        self._stage3_quote_guard_status: dict[str, Any] = {}
+        # Routine Stage-3 quote invalidity can alternate with fresh quotes many
+        # times in one cycle.  Keep the one informational "condition started"
+        # row to at most once per cycle; persistent summaries and all safety-
+        # relevant warnings remain independently eligible.
+        self._stage3_routine_guard_entry_cycle_id = ""
         self.price_snapshot: Optional[dict[str, Any]] = None
         self._last_price_poll_monotonic = 0.0
         self._api_data_seen_count = 0
@@ -250,7 +261,6 @@ class TradingController:
         self._auto_reconnect_enabled = False
         self._last_reconnect_attempt_monotonic = 0.0
         self._reconnect_failures = 0
-        self._last_connection_warning_monotonic = 0.0
         self._latest_rth_status: Optional[dict[str, Any]] = None
         self._price_history: "deque[tuple[float, float]]" = deque(maxlen=21600)
         # The price-history deque retains every bounded-session observation;
@@ -1228,6 +1238,34 @@ class TradingController:
             # cannot keep reporting a previously green snapshot after updates
             # have stopped arriving.
             self.price_snapshot.update(price_snapshot)
+        stage3_status: dict[str, Any] = {}
+        if (
+            self.active_cycle is not None
+            and self.active_cycle.stage == Stage.WAIT_RISE_TRIGGER
+            and str(self._stage3_quote_guard_status.get("cycle_id") or "") == self.active_cycle.id
+        ):
+            stage3_status = dict(self._stage3_quote_guard_status)
+            condition = self._audit_conditions.get(
+                f"stage3_sell_quote_guard|{self.active_cycle.id}"
+            )
+            if condition is not None:
+                stage3_status["duration_seconds"] = max(
+                    0.0,
+                    monotonic_now
+                    - float(condition.get("first_seen_monotonic", monotonic_now)),
+                )
+                stage3_status["occurrence_count"] = int(
+                    condition.get("occurrence_count", 0) or 0
+                )
+                stage3_status["audit_emissions"] = int(
+                    condition.get("audit_emissions", 0) or 0
+                )
+                stage3_status["suppressed_count"] = max(
+                    0,
+                    int(condition.get("occurrence_count", 0) or 0)
+                    - int(condition.get("audit_emissions", 0) or 0),
+                )
+        price_snapshot["stage3_sell_quote_status"] = stage3_status
         self._worker_snapshot_sequence += 1
         snapshot = {
             "connected": self.connected,
@@ -1386,9 +1424,136 @@ class TradingController:
             # Diagnostics must never affect trading or GUI updates.
             pass
 
+    def _prune_inactive_audit_conditions(self) -> None:
+        """Resolve coalesced diagnostics when their owning workflow is gone."""
+        cycle = self.active_cycle
+        if not (
+            cycle is not None
+            and cycle.stage == Stage.WAIT_RISE_TRIGGER
+            and cycle.id == self._stage3_routine_guard_entry_cycle_id
+        ):
+            self._stage3_routine_guard_entry_cycle_id = ""
+        for key, state in list(self._audit_conditions.items()):
+            kind = str(state.get("kind") or "")
+            state_cycle_id = str(state.get("cycle_id") or "")
+            if kind == "stage3_sell_quote_guard":
+                active = bool(
+                    cycle is not None
+                    and cycle.stage == Stage.WAIT_RISE_TRIGGER
+                    and cycle.id == state_cycle_id
+                )
+                if not active:
+                    self._clear_audit_condition(
+                        key,
+                        cycle=cycle if cycle and cycle.id == state_cycle_id else None,
+                        recovery_message="Stage 3 is no longer active.",
+                    )
+                    if str(self._stage3_quote_guard_status.get("cycle_id") or "") == state_cycle_id:
+                        self._stage3_quote_guard_status = {}
+                    if self._stage3_routine_guard_entry_cycle_id == state_cycle_id:
+                        self._stage3_routine_guard_entry_cycle_id = ""
+            elif kind in {"native_order_wait", "native_order_anomaly"}:
+                context = dict(state.get("latest_context") or {})
+                side = str(context.get("side") or "").upper()
+                order_ref = str(context.get("order_ref") or "")
+                if side == "BUY":
+                    active_ref = str(cycle.buy_order_ref or "") if cycle and cycle.stage == Stage.BUY_TRAIL_ACTIVE else ""
+                elif side == "PROTECTIVE_SELL":
+                    active_ref = (
+                        str(cycle.protective_sell_order_ref or "")
+                        if cycle and cycle.stage == Stage.WAIT_RISE_TRIGGER
+                        else ""
+                    )
+                else:
+                    active_ref = str(cycle.sell_order_ref or "") if cycle and cycle.stage == Stage.SELL_TRAIL_ACTIVE else ""
+                if not order_ref or active_ref != order_ref:
+                    self._clear_audit_condition(
+                        key,
+                        cycle=cycle if cycle and cycle.id == state_cycle_id else None,
+                        recovery_message="The broker order is no longer in the waiting state.",
+                    )
+            elif kind == "buy_preflight_block":
+                if cycle is None or cycle.id != state_cycle_id or cycle.stage != Stage.WAIT_INITIAL_DROP:
+                    self._clear_audit_condition(
+                        key,
+                        cycle=cycle if cycle and cycle.id == state_cycle_id else None,
+                        recovery_message="The BUY preflight block is no longer active.",
+                    )
+            elif kind == "session_timing_guard":
+                active = bool(
+                    cycle is not None
+                    and cycle.id == state_cycle_id
+                    and cycle.stage == Stage.WAIT_RISE_TRIGGER
+                    and bool(
+                        getattr(
+                            cycle,
+                            "cancel_sell_and_liquidate_before_close_enabled",
+                            False,
+                        )
+                    )
+                )
+                if not active:
+                    self._clear_audit_condition(
+                        key,
+                        cycle=cycle if cycle and cycle.id == state_cycle_id else None,
+                        recovery_message="The Stage-3 session-timing guard is no longer active.",
+                    )
+            elif kind == "stage4_session_timing_guard":
+                active = bool(
+                    cycle is not None
+                    and cycle.id == state_cycle_id
+                    and cycle.stage == Stage.SELL_TRAIL_ACTIVE
+                    and (
+                        bool(
+                            getattr(
+                                cycle,
+                                "cancel_sell_and_liquidate_before_close_enabled",
+                                False,
+                            )
+                        )
+                        or bool(
+                            getattr(
+                                cycle,
+                                "close_before_rth_liquidation_requested",
+                                False,
+                            )
+                        )
+                    )
+                )
+                if not active:
+                    self._clear_audit_condition(
+                        key,
+                        cycle=cycle if cycle and cycle.id == state_cycle_id else None,
+                        recovery_message="The Stage-4 session-timing guard is no longer active.",
+                    )
+            elif kind == "close_before_rth_wait":
+                active = bool(
+                    cycle is not None
+                    and cycle.id == state_cycle_id
+                    and (
+                        bool(getattr(cycle, "close_before_rth_liquidation_requested", False))
+                        or bool(getattr(cycle, "close_before_rth_cancel_requested", False))
+                    )
+                )
+                if not active:
+                    self._clear_audit_condition(
+                        key,
+                        cycle=cycle if cycle and cycle.id == state_cycle_id else None,
+                        recovery_message="The close-before-RTH workflow is no longer waiting.",
+                    )
+
+        connectivity = dict(self._broker_connectivity or {})
+        if self.connected and connectivity.get("upstream_connected") is True:
+            self._clear_audit_condition(
+                "broker_reconnect",
+                cycle=self.active_cycle,
+                recovery_message="IBKR connectivity is restored.",
+            )
+
     def _run_maintenance_cycle(self, *, force: bool = False) -> None:
         """Run low-frequency housekeeping independently from GUI rendering."""
         self._refresh_stale_active_cycle_flag()
+        self._prune_inactive_audit_conditions()
         if self._last_snapshot_payload:
             self._write_human_debug_report(self._last_snapshot_payload, force=force)
 
@@ -2100,10 +2265,21 @@ class TradingController:
             "Trading and broker-state polling are paused."
         )
         self.signals.connection_changed.emit(False, self.status)
-        now = time.monotonic()
-        if now - self._last_connection_warning_monotonic >= 10.0:
-            self._last_connection_warning_monotonic = now
-            self._log("WARN", f"{self.status} {message}", self.active_cycle)
+        self._update_audit_condition(
+            key="broker_reconnect",
+            family="IBKR connection outage",
+            reason_code="UPSTREAM_DISCONNECTED",
+            message=f"{self.status} {message}",
+            cycle=self.active_cycle,
+            initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+            repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+            summary_level="WARN",
+            first_summary_level="INFO",
+            immediate_level="WARN",
+            immediate_token="outage_started",
+            context={"error_code": code, "connectivity": dict(status)},
+            kind="broker_reconnect",
+        )
 
     def _handle_upstream_connectivity_restored(self, status: dict[str, Any]) -> None:
         message = str(status.get("message") or "IBKR server connectivity was restored.")
@@ -2118,7 +2294,14 @@ class TradingController:
             f"IBKR server connectivity restored{code_text}. Revalidating app-owned orders/executions and market data before trading resumes."
         )
         self.signals.connection_changed.emit(True, self.status)
-        self._log("INFO", f"{self.status} {message}", self.active_cycle)
+        cleared = self._clear_audit_condition(
+            "broker_reconnect",
+            cycle=self.active_cycle,
+            recovery_message=f"{self.status} {message}",
+            context={"error_code": code, "connectivity": dict(status)},
+        )
+        if cleared is None or int(cleared.get("audit_emissions", 0) or 0) <= 0:
+            self._log("INFO", f"{self.status} {message}", self.active_cycle)
 
     def _upstream_trading_ready(self) -> bool:
         status = self._adapter_connectivity_snapshot()
@@ -2210,9 +2393,28 @@ class TradingController:
                 f"{target} connection unavailable. {helper} BouncyBot will retry every "
                 f"{self.RECONNECT_INTERVAL_SECONDS:g} seconds until connected or manually disconnected."
             )
-            self.storage.add_event("WARN", self.status)
+            self._update_audit_condition(
+                key="broker_reconnect",
+                family="IBKR connection outage",
+                reason_code="INITIAL_CONNECT_FAILED",
+                message=self.status,
+                cycle=self.active_cycle,
+                initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+                repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                summary_level="WARN",
+                first_summary_level="INFO",
+                immediate_level="WARN",
+                immediate_token="outage_started",
+                context={
+                    "attempt_count": self._reconnect_failures,
+                    "host": settings.host,
+                    "port": settings.port,
+                },
+                kind="broker_reconnect",
+            )
             self.signals.connection_changed.emit(False, self.status)
             raise BrokerAdapterError(self.status) from exc
+        failed_attempts = int(self._reconnect_failures)
         self._reconnect_failures = 0
         self._last_reconnect_attempt_monotonic = 0.0
         self.connected = True
@@ -2233,13 +2435,38 @@ class TradingController:
                 f"Connected locally to {target} {settings.host}:{settings.port}, but the IBKR server link is unavailable{code_text}. "
                 "Trading and broker recovery are paused."
             )
-            self.storage.add_event("WARN", self.status, raw={"connectivity": connectivity, "detail": detail})
+            self._update_audit_condition(
+                key="broker_reconnect",
+                family="IBKR connection outage",
+                reason_code="UPSTREAM_UNAVAILABLE_AFTER_CONNECT",
+                message=self.status,
+                cycle=self.active_cycle,
+                initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+                repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                summary_level="WARN",
+                first_summary_level="INFO",
+                immediate_level="WARN",
+                immediate_token="outage_started",
+                context={"connectivity": connectivity, "detail": detail},
+                kind="broker_reconnect",
+            )
             self.signals.connection_changed.emit(False, self.status)
             self.emit_snapshot(force=True)
             return False
         self._refresh_display_accounts()
         self.status = f"Connected to {target} {settings.host}:{settings.port} ({settings.trading_mode})"
-        self.storage.add_event("INFO", self.status)
+        cleared = self._clear_audit_condition(
+            "broker_reconnect",
+            cycle=self.active_cycle,
+            recovery_message=self.status,
+            context={
+                "host": settings.host,
+                "port": settings.port,
+                "failed_attempts": failed_attempts,
+            },
+        )
+        if cleared is None or int(cleared.get("audit_emissions", 0) or 0) <= 0:
+            self.storage.add_event("INFO", self.status)
         self.signals.connection_changed.emit(True, self.status)
         if self._upstream_recovery_pending:
             if not self._recover_upstream_session_if_needed():
@@ -2281,6 +2508,11 @@ class TradingController:
 
     def _disconnect(self) -> None:
         self._auto_reconnect_enabled = False
+        self._clear_audit_condition(
+            "broker_reconnect",
+            cycle=self.active_cycle,
+            emit_recovery=False,
+        )
         if self.adapter.is_connected():
             self.adapter.disconnect()
         self.connected = False
@@ -3649,10 +3881,21 @@ class TradingController:
             f"Auto-reconnect will retry every {self.RECONNECT_INTERVAL_SECONDS:g} seconds until connected."
         )
         self.signals.connection_changed.emit(False, self.status)
-        now = time.monotonic()
-        if now - self._last_connection_warning_monotonic >= 10.0:
-            self._last_connection_warning_monotonic = now
-            self._log("WARN", self.status, self.active_cycle)
+        self._update_audit_condition(
+            key="broker_reconnect",
+            family="IBKR connection outage",
+            reason_code="LOCAL_API_DISCONNECTED",
+            message=self.status,
+            cycle=self.active_cycle,
+            initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+            repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+            summary_level="WARN",
+            first_summary_level="INFO",
+            immediate_level="WARN",
+            immediate_token="outage_started",
+            context={"attempt_count": self._reconnect_failures, "error": message},
+            kind="broker_reconnect",
+        )
 
     def _attempt_reconnect_if_due(self) -> bool:
         if not self._auto_reconnect_enabled:
@@ -3668,6 +3911,7 @@ class TradingController:
             self.status = f"Reconnecting to {self._platform_name()}... attempt {self._reconnect_failures + 1}"
             self.signals.connection_changed.emit(False, self.status)
             self.adapter.connect(self.connection.host, self.connection.port, self.connection.client_id, self.connection.market_data_type)
+            failed_attempts = int(self._reconnect_failures)
             self.connected = True
             self._reconnect_failures = 0
             self._last_reconnect_attempt_monotonic = 0.0
@@ -3687,12 +3931,40 @@ class TradingController:
                     f"Reconnected locally to {self._platform_name()} {self.connection.host}:{self.connection.port}, "
                     f"but the IBKR server link is unavailable{code_text}. Trading and broker recovery are paused."
                 )
-                self.storage.add_event("WARN", self.status, raw={"connectivity": connectivity})
+                self._update_audit_condition(
+                    key="broker_reconnect",
+                    family="IBKR connection outage",
+                    reason_code="UPSTREAM_UNAVAILABLE_AFTER_RECONNECT",
+                    message=self.status,
+                    cycle=self.active_cycle,
+                    initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+                    repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                    summary_level="WARN",
+                    first_summary_level="INFO",
+                    immediate_level="WARN",
+                    immediate_token="outage_started",
+                    context={
+                        "attempt_count": failed_attempts,
+                        "connectivity": connectivity,
+                    },
+                    kind="broker_reconnect",
+                )
                 self.signals.connection_changed.emit(False, self.status)
                 self.emit_snapshot(force=True)
                 return True
             self.status = f"Reconnected to {self._platform_name()} {self.connection.host}:{self.connection.port} ({self.connection.trading_mode})"
-            self.storage.add_event("INFO", self.status)
+            cleared = self._clear_audit_condition(
+                "broker_reconnect",
+                cycle=self.active_cycle,
+                recovery_message=self.status,
+                context={
+                    "host": self.connection.host,
+                    "port": self.connection.port,
+                    "failed_attempts": failed_attempts,
+                },
+            )
+            if cleared is None or int(cleared.get("audit_emissions", 0) or 0) <= 0:
+                self.storage.add_event("INFO", self.status)
             self.signals.connection_changed.emit(True, self.status)
             if self._upstream_recovery_pending:
                 if not self._recover_upstream_session_if_needed():
@@ -3718,7 +3990,19 @@ class TradingController:
                 f"{self.RECONNECT_INTERVAL_SECONDS:g} seconds."
             )
             self.signals.connection_changed.emit(False, self.status)
-            self._log("WARN", self.status, self.active_cycle)
+            self._update_audit_condition(
+                key="broker_reconnect",
+                family="IBKR connection outage",
+                reason_code="RECONNECT_ATTEMPT_FAILED",
+                message=self.status,
+                cycle=self.active_cycle,
+                initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+                repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                summary_level="WARN",
+                first_summary_level="INFO",
+                context={"attempt_count": self._reconnect_failures, "error": str(exc)},
+                kind="broker_reconnect",
+            )
             return False
 
     def _ensure_connection_alive(self) -> bool:
@@ -5320,6 +5604,319 @@ class TradingController:
             self._last_price_warning_at[key] = now
             self._log("WARN", message, cycle)
 
+    @staticmethod
+    def _format_diagnostic_duration(seconds: float) -> str:
+        seconds = max(0.0, float(seconds or 0.0))
+        if seconds < 60.0:
+            return f"{seconds:.0f}s"
+        minutes = seconds / 60.0
+        if minutes < 60.0:
+            return f"{minutes:.1f}m"
+        return f"{minutes / 60.0:.1f}h"
+
+    def _emit_diagnostic_event(
+        self,
+        level: str,
+        message: str,
+        cycle: Optional[CycleState],
+        raw: dict[str, Any],
+    ) -> None:
+        """Emit a structured diagnostic while tolerating older test doubles."""
+        try:
+            self._log(level, message, cycle, raw=raw)
+        except TypeError as exc:
+            # A few focused tests replace _log with a legacy three-argument
+            # callable. Production always uses the structured form above.
+            detail = str(exc).lower()
+            if "raw" not in detail or "keyword" not in detail:
+                raise
+            self._log(level, message, cycle)
+
+    def _update_audit_condition(
+        self,
+        *,
+        key: str,
+        family: str,
+        reason_code: str,
+        message: str,
+        cycle: Optional[CycleState] = None,
+        initial_delay_seconds: float = DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+        repeat_interval_seconds: float = DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+        summary_level: str = "WARN",
+        first_summary_level: Optional[str] = None,
+        immediate_level: Optional[str] = None,
+        immediate_message: Optional[str] = None,
+        immediate_token: Optional[str] = None,
+        context: Optional[dict[str, Any]] = None,
+        kind: str = "generic",
+    ) -> dict[str, Any]:
+        """Coalesce a persistent condition into bounded operator/audit events.
+
+        Stable keys and reason codes prevent changing ages, prices, and
+        timestamps from bypassing suppression. Every observation remains
+        available to the GUI through the returned state, while SQLite receives
+        only an operationally relevant immediate event and periodic summaries.
+        """
+        now = time.monotonic()
+        wall_now = utc_now_iso()
+        normalized_key = str(key or family or "diagnostic")
+        normalized_reason = str(reason_code or "UNKNOWN").strip().upper() or "UNKNOWN"
+        state = self._audit_conditions.get(normalized_key)
+        if state is None:
+            state = {
+                "key": normalized_key,
+                "kind": str(kind or "generic"),
+                "family": str(family or "Diagnostic condition"),
+                "cycle_id": cycle.id if cycle else "",
+                "ticker": cycle.ticker if cycle else "",
+                "first_seen_at": wall_now,
+                "last_seen_at": wall_now,
+                "first_seen_monotonic": now,
+                "last_seen_monotonic": now,
+                "occurrence_count": 0,
+                "audit_emissions": 0,
+                "immediate_emissions": 0,
+                "summary_emissions": 0,
+                "last_immediate_monotonic": 0.0,
+                "last_summary_monotonic": 0.0,
+                "reason_counts": {},
+                "immediate_reason_codes": set(),
+                "latest_reason_code": normalized_reason,
+                "latest_message": str(message or ""),
+                "latest_context": {},
+                "max_metrics": {},
+                "initial_delay_seconds": max(0.0, float(initial_delay_seconds or 0.0)),
+                "repeat_interval_seconds": max(1.0, float(repeat_interval_seconds or 1.0)),
+                "summary_level": str(summary_level or "WARN").upper(),
+                "first_summary_level": str(
+                    first_summary_level or summary_level or "WARN"
+                ).upper(),
+            }
+            self._audit_conditions[normalized_key] = state
+        else:
+            # A later observation may increase operational relevance (for
+            # example a normal native order wait later crosses its diagnostic
+            # trigger).  Escalate timing and severity policies without ever
+            # making an existing condition less visible.
+            state["initial_delay_seconds"] = min(
+                float(state.get("initial_delay_seconds", initial_delay_seconds) or 0.0),
+                max(0.0, float(initial_delay_seconds or 0.0)),
+            )
+            state["repeat_interval_seconds"] = min(
+                float(state.get("repeat_interval_seconds", repeat_interval_seconds) or 1.0),
+                max(1.0, float(repeat_interval_seconds or 1.0)),
+            )
+            severity_rank = {"INFO": 1, "WARN": 2, "ERROR": 3}
+            existing_level = str(state.get("summary_level") or "WARN").upper()
+            requested_level = str(summary_level or "WARN").upper()
+            if severity_rank.get(requested_level, 2) > severity_rank.get(existing_level, 2):
+                state["summary_level"] = requested_level
+            if first_summary_level is not None:
+                existing_first_level = str(
+                    state.get("first_summary_level") or existing_level
+                ).upper()
+                requested_first_level = str(first_summary_level).upper()
+                if severity_rank.get(requested_first_level, 2) > severity_rank.get(
+                    existing_first_level,
+                    2,
+                ):
+                    state["first_summary_level"] = requested_first_level
+
+        state["last_seen_at"] = wall_now
+        state["last_seen_monotonic"] = now
+        state["occurrence_count"] = int(state.get("occurrence_count", 0) or 0) + 1
+        state["latest_reason_code"] = normalized_reason
+        state["latest_message"] = str(message or "")
+        reason_counts = dict(state.get("reason_counts") or {})
+        reason_counts[normalized_reason] = int(reason_counts.get(normalized_reason, 0) or 0) + 1
+        state["reason_counts"] = reason_counts
+
+        latest_context = dict(context or {})
+        state["latest_context"] = latest_context
+        max_metrics = dict(state.get("max_metrics") or {})
+        for metric_name, metric_value in latest_context.items():
+            if isinstance(metric_value, bool) or not isinstance(metric_value, (int, float)):
+                continue
+            number = float(metric_value)
+            if not isfinite(number):
+                continue
+            previous = max_metrics.get(metric_name)
+            if previous is None or number > float(previous):
+                max_metrics[metric_name] = number
+        state["max_metrics"] = max_metrics
+
+        immediate_codes = state.get("immediate_reason_codes")
+        if not isinstance(immediate_codes, set):
+            immediate_codes = set(immediate_codes or [])
+            state["immediate_reason_codes"] = immediate_codes
+        immediate_identity = str(immediate_token or normalized_reason).strip() or normalized_reason
+        immediate_emitted_now = False
+        if immediate_level and immediate_identity not in immediate_codes:
+            immediate_codes.add(immediate_identity)
+            raw = {
+                "diagnostic_condition": {
+                    "phase": "immediate",
+                    "key": normalized_key,
+                    "kind": state.get("kind"),
+                    "family": state.get("family"),
+                    "reason_code": normalized_reason,
+                    "reason_counts": dict(reason_counts),
+                    "first_seen_at": state.get("first_seen_at"),
+                    "last_seen_at": state.get("last_seen_at"),
+                    "occurrence_count": int(state.get("occurrence_count", 0) or 0),
+                    "latest_context": latest_context,
+                    "max_metrics": dict(max_metrics),
+                }
+            }
+            self._emit_diagnostic_event(
+                str(immediate_level).upper(),
+                str(immediate_message or f"{state['family']}: {message}"),
+                cycle,
+                raw,
+            )
+            state["audit_emissions"] = int(state.get("audit_emissions", 0) or 0) + 1
+            state["immediate_emissions"] = int(state.get("immediate_emissions", 0) or 0) + 1
+            state["last_immediate_monotonic"] = now
+            immediate_emitted_now = True
+
+        elapsed = max(0.0, now - float(state.get("first_seen_monotonic", now)))
+        summary_emissions = int(state.get("summary_emissions", 0) or 0)
+        last_immediate = float(state.get("last_immediate_monotonic", 0.0) or 0.0)
+        last_summary = float(state.get("last_summary_monotonic", 0.0) or 0.0)
+        initial_delay = float(state.get("initial_delay_seconds", initial_delay_seconds) or 0.0)
+        repeat_interval = float(state.get("repeat_interval_seconds", repeat_interval_seconds) or 1.0)
+        if summary_emissions == 0:
+            summary_reference = max(
+                float(state.get("first_seen_monotonic", now)),
+                last_immediate,
+            )
+            summary_interval = initial_delay
+        else:
+            summary_reference = max(last_summary, last_immediate)
+            summary_interval = repeat_interval
+        summary_due = bool(
+            not immediate_emitted_now
+            and now - summary_reference >= summary_interval
+        )
+        if summary_due:
+            occurrence_count = int(state.get("occurrence_count", 0) or 0)
+            audit_emissions = int(state.get("audit_emissions", 0) or 0)
+            immediate_emissions = int(state.get("immediate_emissions", 0) or 0)
+            # This summary represents the current observation in SQLite, so
+            # count it together with earlier immediate/summary emissions when
+            # reporting how many cadence observations were actually suppressed.
+            suppressed = max(0, occurrence_count - (audit_emissions + 1))
+            summary = (
+                f"{state['family']} has remained active for "
+                f"{self._format_diagnostic_duration(elapsed)}: {message} "
+                f"Observed {occurrence_count} times; {suppressed} repeated observations suppressed."
+            )
+            raw = {
+                "diagnostic_condition": {
+                    "phase": "summary",
+                    "key": normalized_key,
+                    "kind": state.get("kind"),
+                    "family": state.get("family"),
+                    "reason_code": normalized_reason,
+                    "reason_counts": dict(reason_counts),
+                    "first_seen_at": state.get("first_seen_at"),
+                    "last_seen_at": state.get("last_seen_at"),
+                    "duration_seconds": elapsed,
+                    "occurrence_count": occurrence_count,
+                    "suppressed_count": suppressed,
+                    "immediate_emissions": immediate_emissions,
+                    "latest_context": latest_context,
+                    "max_metrics": dict(max_metrics),
+                }
+            }
+            self._emit_diagnostic_event(
+                str(
+                    state.get("first_summary_level")
+                    if summary_emissions == 0
+                    else state.get("summary_level")
+                )
+                or "WARN",
+                summary,
+                cycle,
+                raw,
+            )
+            state["audit_emissions"] = audit_emissions + 1
+            state["summary_emissions"] = summary_emissions + 1
+            state["last_summary_monotonic"] = now
+        return state
+
+    def _clear_audit_condition(
+        self,
+        key: str,
+        *,
+        cycle: Optional[CycleState] = None,
+        recovery_message: str = "",
+        emit_recovery: bool = True,
+        context: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        state = self._audit_conditions.pop(str(key or ""), None)
+        if state is None:
+            return None
+        audit_emissions = int(state.get("audit_emissions", 0) or 0)
+        if not emit_recovery or audit_emissions <= 0:
+            return state
+        now = time.monotonic()
+        elapsed = max(0.0, now - float(state.get("first_seen_monotonic", now)))
+        occurrences = int(state.get("occurrence_count", 0) or 0)
+        immediate_emissions = int(state.get("immediate_emissions", 0) or 0)
+        suppressed = max(0, occurrences - audit_emissions)
+        suffix = f" {recovery_message.strip()}" if recovery_message.strip() else ""
+        message = (
+            f"{state.get('family') or 'Diagnostic condition'} recovered after "
+            f"{self._format_diagnostic_duration(elapsed)}; {suppressed} repeated observations "
+            f"were suppressed.{suffix}"
+        )
+        raw = {
+            "diagnostic_condition_recovery": {
+                "key": state.get("key"),
+                "kind": state.get("kind"),
+                "family": state.get("family"),
+                "first_seen_at": state.get("first_seen_at"),
+                "recovered_at": utc_now_iso(),
+                "duration_seconds": elapsed,
+                "occurrence_count": occurrences,
+                "suppressed_count": suppressed,
+                "immediate_emissions": immediate_emissions,
+                "reason_counts": dict(state.get("reason_counts") or {}),
+                "max_metrics": dict(state.get("max_metrics") or {}),
+                "context": dict(context or {}),
+            }
+        }
+        self._emit_diagnostic_event("INFO", message, cycle, raw)
+        return state
+
+    def _audit_condition_snapshot(self, key: str) -> dict[str, Any]:
+        state = self._audit_conditions.get(str(key or ""))
+        if state is None:
+            return {}
+        now = time.monotonic()
+        occurrences = int(state.get("occurrence_count", 0) or 0)
+        audit_emissions = int(state.get("audit_emissions", 0) or 0)
+        return {
+            "active": True,
+            "key": state.get("key"),
+            "kind": state.get("kind"),
+            "family": state.get("family"),
+            "reason_code": state.get("latest_reason_code"),
+            "message": state.get("latest_message"),
+            "first_seen_at": state.get("first_seen_at"),
+            "last_seen_at": state.get("last_seen_at"),
+            "duration_seconds": max(
+                0.0,
+                now - float(state.get("first_seen_monotonic", now)),
+            ),
+            "observations": occurrences,
+            "suppressed_observations": max(0, occurrences - audit_emissions),
+            "reason_counts": dict(state.get("reason_counts") or {}),
+            "latest_context": dict(state.get("latest_context") or {}),
+            "max_metrics": dict(state.get("max_metrics") or {}),
+        }
+
     def _mark_recovery_required(self, cycle: CycleState, message: str) -> None:
         """Move an unclear state into a formal recovery-required/manual-review mode."""
         cycle.stage = Stage.MANUAL_REVIEW
@@ -5831,9 +6428,35 @@ class TradingController:
             cycle.touch()
             self.active_cycle = cycle
             self.storage.upsert_cycle(cycle)
-            self._log("WARN", message, cycle)
-            return
-        self._log_price_warning_throttled(cycle, message, interval_seconds=60.0)
+        lowered = str(message or "").lower()
+        if "cancel" in lowered:
+            reason_code = "WAITING_FOR_CANCEL_CONFIRMATION"
+        elif "working" in lowered or "fill" in lowered:
+            reason_code = "WAITING_FOR_ORDER_SETTLEMENT"
+        else:
+            reason_code = "WAITING_FOR_CLOSE_WORKFLOW"
+        self._update_audit_condition(
+            key=f"close_before_rth_wait|{cycle.id}",
+            family="Close-before-RTH workflow",
+            reason_code=reason_code,
+            message=message,
+            cycle=cycle,
+            initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+            repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+            summary_level="WARN",
+            immediate_level="WARN",
+            immediate_message=message if changed else None,
+            immediate_token=reason_code,
+            context={
+                "close_before_rth_liquidation_requested": bool(
+                    getattr(cycle, "close_before_rth_liquidation_requested", False)
+                ),
+                "close_before_rth_cancel_requested": bool(
+                    getattr(cycle, "close_before_rth_cancel_requested", False)
+                ),
+            },
+            kind="close_before_rth_wait",
+        )
 
     def _liquidate_profitable_stage3_before_close_if_needed(
         self,
@@ -5851,31 +6474,84 @@ class TradingController:
         timing = self._session_minutes_from_rth_status()
         minutes_raw = timing.get("minutes_to_close") if timing.get("available") else None
         if minutes_raw is None:
-            self._log_price_warning_throttled(
-                cycle,
-                "Close-before-RTH is enabled in Stage 3, but the regular-session boundary is unavailable. "
-                "No market SELL will be submitted without a confirmed cutoff.",
-                interval_seconds=60.0,
-                throttle_key=f"stage3_close_boundary|{cycle.id}",
+            self._update_audit_condition(
+                key=f"stage3_close_boundary|{cycle.id}",
+                family="Stage 3 close-before-RTH timing guard",
+                reason_code="SESSION_BOUNDARY_UNAVAILABLE",
+                message=(
+                    "The regular-session boundary is unavailable. No market SELL will be "
+                    "submitted without a confirmed cutoff."
+                ),
+                cycle=cycle,
+                initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+                repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                summary_level="WARN",
+                immediate_level="WARN",
+                immediate_message=(
+                    "Stage 3 close-before-RTH cannot verify the regular-session boundary; "
+                    "no market SELL will be submitted without a confirmed cutoff."
+                ),
+                immediate_token="session_boundary_unavailable",
+                context={"timing": dict(timing)},
+                kind="session_timing_guard",
             )
             return False
+        self._clear_audit_condition(
+            f"stage3_close_boundary|{cycle.id}",
+            cycle=cycle,
+            recovery_message="The regular-session boundary is available again.",
+            context={"timing": dict(timing)},
+        )
         minutes_to_close = float(minutes_raw)
         rth_open = bool((self._latest_rth_status or {}).get("is_open"))
         if not rth_open or not (0 < minutes_to_close <= cutoff):
+            self._clear_audit_condition(
+                f"stage3_close_not_profitable|{cycle.id}",
+                cycle=cycle,
+                recovery_message="The cycle is outside the configured pre-close liquidation window.",
+            )
             return False
 
         avg_buy = float(cycle.avg_buy_price or 0.0)
         executable_bid = float(current_price or 0.0)
         if avg_buy <= 0 or executable_bid <= avg_buy:
-            self._log_price_warning_throttled(
-                cycle,
-                "Close-before-RTH Stage-3 liquidation was not started because the executable SELL bid "
-                f"({executable_bid:.4f}) is not strictly above the average BUY price ({avg_buy:.4f}). "
-                "Commissions are intentionally ignored for this comparison.",
-                interval_seconds=60.0,
-                throttle_key=f"stage3_close_not_profitable|{cycle.id}",
+            self._update_audit_condition(
+                key=f"stage3_close_not_profitable|{cycle.id}",
+                family="Stage 3 close-before-RTH profitability guard",
+                reason_code="EXECUTABLE_BID_NOT_ABOVE_BUY",
+                message=(
+                    "Liquidation was not started because the executable SELL bid "
+                    f"({executable_bid:.4f}) is not strictly above the average BUY price "
+                    f"({avg_buy:.4f}). Commissions are intentionally ignored for this comparison."
+                ),
+                cycle=cycle,
+                initial_delay_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                repeat_interval_seconds=self.NATIVE_ORDER_WAIT_SUMMARY_SECONDS,
+                summary_level="INFO",
+                immediate_level="INFO",
+                immediate_message=(
+                    "Stage 3 close-before-RTH is waiting because the executable bid is not "
+                    "above the average BUY price."
+                ),
+                immediate_token="not_profitable",
+                context={
+                    "executable_bid": executable_bid,
+                    "average_buy_price": avg_buy,
+                    "minutes_to_close": minutes_to_close,
+                },
+                kind="session_timing_guard",
             )
             return False
+        self._clear_audit_condition(
+            f"stage3_close_not_profitable|{cycle.id}",
+            cycle=cycle,
+            recovery_message="The executable bid is now above the average BUY price.",
+            context={
+                "executable_bid": executable_bid,
+                "average_buy_price": avg_buy,
+                "minutes_to_close": minutes_to_close,
+            },
+        )
 
         if not bool(getattr(cycle, "close_before_rth_liquidation_requested", False)):
             cycle.close_before_rth_liquidation_requested = True
@@ -5972,13 +6648,35 @@ class TradingController:
                     f"cannot be verified ({detail}). No replacement SELL will be submitted without a confirmed open RTH session.",
                 )
             else:
-                self._log_price_warning_throttled(
-                    cycle,
-                    "Close-before-RTH liquidation is enabled, but the contract's regular-session boundary "
-                    f"cannot be verified ({detail}). Automatic liquidation will not start without a confirmed boundary.",
-                    interval_seconds=60.0,
+                self._update_audit_condition(
+                    key=f"stage4_close_boundary|{cycle.id}",
+                    family="Stage 4 close-before-RTH timing guard",
+                    reason_code="SESSION_BOUNDARY_UNAVAILABLE",
+                    message=(
+                        "The contract's regular-session boundary cannot be verified "
+                        f"({detail}). Automatic liquidation will not start without a "
+                        "confirmed boundary."
+                    ),
+                    cycle=cycle,
+                    initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+                    repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                    summary_level="WARN",
+                    immediate_level="WARN",
+                    immediate_message=(
+                        "Stage 4 close-before-RTH cannot verify the regular-session "
+                        "boundary; automatic liquidation will not start."
+                    ),
+                    immediate_token="session_boundary_unavailable",
+                    context={"timing": dict(timing)},
+                    kind="stage4_session_timing_guard",
                 )
             return
+        self._clear_audit_condition(
+            f"stage4_close_boundary|{cycle.id}",
+            cycle=cycle,
+            recovery_message="The regular-session boundary is available again.",
+            context={"timing": dict(timing)},
+        )
         minutes_raw = timing.get("minutes_to_close")
         if minutes_raw is None:
             return
@@ -6284,11 +6982,36 @@ class TradingController:
         self.active_cycle = blocked
         self.storage.upsert_cycle(blocked)
         normalized_code = str(blocker_code or "preflight").strip().lower() or "preflight"
-        self._log_price_warning_throttled(
-            blocked,
-            message,
-            interval_seconds=self.BUY_PREFLIGHT_AUDIT_THROTTLE_SECONDS,
-            throttle_key=f"buy_preflight_block|{cycle.id}|{normalized_code}",
+        informational_codes = {
+            "atr_warmup",
+            "rth_closed",
+            "session_timing",
+            "timing",
+        }
+        informational = normalized_code in informational_codes
+        immediate_level = "INFO" if informational else "WARN"
+        self._update_audit_condition(
+            key=f"buy_preflight_block|{cycle.id}",
+            family="BUY preflight block",
+            reason_code=normalized_code.upper(),
+            message=message,
+            cycle=blocked,
+            initial_delay_seconds=(
+                self.NATIVE_ORDER_WAIT_SUMMARY_SECONDS
+                if informational
+                else self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS
+            ),
+            repeat_interval_seconds=(
+                self.NATIVE_ORDER_WAIT_SUMMARY_SECONDS
+                if informational
+                else self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS
+            ),
+            summary_level="INFO" if informational else "WARN",
+            first_summary_level="INFO" if informational else "WARN",
+            immediate_level=immediate_level,
+            immediate_message=message,
+            context={"blocker_code": normalized_code},
+            kind="buy_preflight_block",
         )
 
     @staticmethod
@@ -6819,6 +7542,375 @@ class TradingController:
         }
         return evidence, ""
 
+    @staticmethod
+    def _stage3_sell_guard_reason_code(message: str) -> str:
+        """Map one Stage-3 quote detail to a stable audit/GUI reason code."""
+        text = str(message or "").strip().lower()
+        if not text:
+            return "OK"
+        if "field-level market-data freshness is unavailable" in text:
+            return "FIELD_TRACKING_UNAVAILABLE"
+        if "no distinct market-data update" in text:
+            return "NO_DISTINCT_UPDATE"
+        if "upstream connectivity is not confirmed" in text:
+            return "UPSTREAM_UNCONFIRMED"
+        if "market-data event identity is unavailable" in text:
+            return "EVENT_IDENTITY_UNAVAILABLE"
+        if "bid/ask pair is incomplete" in text:
+            return "INCOMPLETE_QUOTE"
+        if "bid/ask pair is crossed" in text:
+            return "CROSSED_QUOTE"
+        if "bid/ask update time is unavailable" in text:
+            return "QUOTE_TIME_UNAVAILABLE"
+        if "latest market-data event did not update" in text:
+            return "NO_PRICE_FIELD_UPDATE"
+        if "bid/ask pair is" in text and "old" in text:
+            return "STALE_QUOTE"
+        if "field timestamps are unavailable" in text:
+            return "FIELD_TIMESTAMPS_UNAVAILABLE"
+        stale_field_message = "exceed" in text and "configured" in text
+        if stale_field_message and "bid" in text and "ask" in text:
+            return "STALE_BID_ASK"
+        if stale_field_message and "bid" in text:
+            return "STALE_BID"
+        if stale_field_message and "ask" in text:
+            return "STALE_ASK"
+        if "spread" in text and "exceeds the configured" in text:
+            return "SPREAD_TOO_WIDE"
+        if "rise trigger is unavailable" in text:
+            return "TRIGGER_UNAVAILABLE"
+        if "does not confirm the rise trigger" in text:
+            return "TRIGGER_NOT_REACHED"
+        return "UNKNOWN_QUOTE_GUARD"
+
+    def _stage3_sell_quote_context(
+        self,
+        cycle: CycleState,
+        evidence: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Build display-only context for Stage-3 quote diagnostics."""
+        snapshot = dict(self.price_snapshot or {})
+        fields = dict(snapshot.get("fields") or {})
+        context = dict(evidence or {})
+        basis = str(snapshot.get("selected_price_basis") or snapshot.get("source") or "")
+        delayed = basis.startswith("delayed_")
+        try:
+            selected_mode = int(
+                snapshot.get("subscription_market_data_type")
+                if snapshot.get("subscription_market_data_type") is not None
+                else snapshot.get("selected_market_data_type")
+            )
+        except Exception:
+            selected_mode = 0
+        delayed = delayed or selected_mode in {3, 4}
+        explicit_delayed = delayed and (
+            fields.get("delayedBid") is not None or fields.get("delayedAsk") is not None
+        )
+        bid_name = "delayedBid" if explicit_delayed else "bid"
+        ask_name = "delayedAsk" if explicit_delayed else "ask"
+        bid = self._positive_float(context.get("bid")) or self._positive_float(fields.get(bid_name))
+        ask = self._positive_float(context.get("ask")) or self._positive_float(fields.get(ask_name))
+        trigger = self._positive_float(cycle.rise_trigger_price)
+        if trigger is None:
+            trigger = self._positive_float(StrategyEngine.recalculate_rise_trigger_price(cycle))
+        selected_price = self._positive_float(snapshot.get("strategy_price"))
+        if selected_price is None:
+            selected_price = self._positive_float(snapshot.get("price"))
+        reference = bid or selected_price or self._positive_float(cycle.last_price)
+        spread_pct: Optional[float] = None
+        if bid is not None and ask is not None and ask >= bid:
+            midpoint = (bid + ask) / 2.0
+            if midpoint > 0:
+                spread_pct = ((ask - bid) / midpoint) * 100.0
+        distance_pct: Optional[float] = None
+        if reference is not None and trigger is not None and trigger > 0:
+            distance_pct = ((reference - trigger) / trigger) * 100.0
+        near_trigger = bool(
+            distance_pct is not None
+            and distance_pct >= -abs(float(self.STAGE3_NEAR_TRIGGER_PCT))
+        )
+        context.update(
+            {
+                "bid": bid,
+                "ask": ask,
+                "bid_age_seconds": self._snapshot_field_age_now(snapshot, bid_name),
+                "ask_age_seconds": self._snapshot_field_age_now(snapshot, ask_name),
+                "spread_pct": spread_pct,
+                "selected_price": selected_price,
+                "selected_price_source": snapshot.get("strategy_price_source") or snapshot.get("source"),
+                "rise_trigger_price": trigger,
+                "trigger_price": trigger,
+                "reference_price": reference,
+                "trigger_distance_pct": distance_pct,
+                "near_trigger": near_trigger,
+                "confirmation_pending": bool(
+                    self._stage3_sell_confirmation
+                    and str(self._stage3_sell_confirmation.get("cycle_id") or "") == cycle.id
+                ),
+            }
+        )
+        return context
+
+    def _stage3_sell_quote_evidence_detail(
+        self,
+        cycle: CycleState,
+        *,
+        require_latest_event: bool,
+        require_trigger: bool = True,
+    ) -> tuple[Optional[dict[str, Any]], str, str, dict[str, Any]]:
+        """Return evidence, detail, stable reason code, and display context."""
+        evidence, message = self._stage3_sell_quote_evidence(
+            cycle,
+            require_latest_event=require_latest_event,
+            require_trigger=require_trigger,
+        )
+        reason_code = "OK" if evidence is not None else self._stage3_sell_guard_reason_code(message)
+        context = self._stage3_sell_quote_context(cycle, evidence)
+        return evidence, message, reason_code, context
+
+    @staticmethod
+    def _stage3_quote_guard_condition_key(cycle: CycleState) -> str:
+        return f"stage3_sell_quote_guard|{cycle.id}"
+
+    def _set_stage3_quote_guard_status(
+        self,
+        cycle: CycleState,
+        *,
+        state: str,
+        reason_code: str,
+        message: str,
+        context: Optional[dict[str, Any]] = None,
+        severity: str = "normal",
+    ) -> None:
+        condition = self._audit_condition_snapshot(
+            self._stage3_quote_guard_condition_key(cycle)
+        )
+        context_data = dict(context or {})
+        observations = int(condition.get("observations", 0) or 0)
+        suppressed = int(condition.get("suppressed_observations", 0) or 0)
+        trigger_price = context_data.get("trigger_price")
+        if trigger_price is None:
+            trigger_price = context_data.get("rise_trigger_price")
+        self._stage3_quote_guard_status = {
+            "active": cycle.stage == Stage.WAIT_RISE_TRIGGER,
+            "cycle_id": cycle.id,
+            "state": str(state or "waiting"),
+            "severity": str(severity or "normal"),
+            "reason_code": str(reason_code or ""),
+            "message": str(message or ""),
+            "bid": context_data.get("bid"),
+            "ask": context_data.get("ask"),
+            "spread_pct": context_data.get("spread_pct"),
+            "bid_age_seconds": context_data.get("bid_age_seconds"),
+            "ask_age_seconds": context_data.get("ask_age_seconds"),
+            "reference_price": context_data.get("reference_price"),
+            "trigger_price": trigger_price,
+            "trigger_distance_pct": context_data.get("trigger_distance_pct"),
+            "near_trigger": bool(context_data.get("near_trigger")),
+            "confirmation_pending": bool(context_data.get("confirmation_pending")),
+            "confirmation_count": int(context_data.get("confirmation_count", 0) or 0),
+            "confirmation_required": self.STAGE3_SELL_CONFIRMATIONS_REQUIRED,
+            "duration_seconds": float(condition.get("duration_seconds", 0.0) or 0.0),
+            "occurrence_count": observations,
+            "suppressed_count": suppressed,
+            "updated_at": utc_now_iso(),
+        }
+
+    def _observe_stage3_quote_guard(
+        self,
+        cycle: CycleState,
+        *,
+        reason_code: str,
+        message: str,
+        context: dict[str, Any],
+        confirmation_was_pending: bool = False,
+    ) -> None:
+        """Update Stage-3 GUI state while coalescing routine quote failures."""
+        key = self._stage3_quote_guard_condition_key(cycle)
+        normalized_reason = str(reason_code or "UNKNOWN_QUOTE_GUARD").upper()
+
+        if normalized_reason == "TRIGGER_NOT_REACHED":
+            # This outcome proves that a complete fresh quote is available; the
+            # executable bid is simply below the profit trigger. It is normal
+            # Stage-3 waiting, so resolve any prior quote-evidence condition.
+            self._clear_audit_condition(
+                key,
+                cycle=cycle,
+                recovery_message="Fresh quote supervision is available again.",
+                context=context,
+            )
+            self._set_stage3_quote_guard_status(
+                cycle,
+                state="waiting_below_trigger",
+                reason_code=normalized_reason,
+                message=message,
+                context=context,
+                severity="normal",
+            )
+            return
+
+        if normalized_reason in {"NO_DISTINCT_UPDATE", "NO_PRICE_FIELD_UPDATE"}:
+            # Cached reads and non-price ticker events are expected between real
+            # quote updates. Do not create an audit row and do not clear a
+            # persistent stale/incomplete-quote condition merely because this
+            # read cannot prove recovery.
+            existing = self._audit_conditions.get(key)
+            if confirmation_was_pending:
+                condition = self._update_audit_condition(
+                    key=key,
+                    family="Stage-3 SELL quote evidence",
+                    reason_code=normalized_reason,
+                    message=message,
+                    cycle=cycle,
+                    initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+                    repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                    summary_level="WARN",
+                    immediate_level="WARN",
+                    immediate_message=(
+                        "Stage-3 SELL confirmation was invalidated before the second "
+                        f"qualifying quote: {message}"
+                    ),
+                    immediate_token=f"confirmation_invalidated|{normalized_reason}",
+                    context=context,
+                    kind="stage3_sell_quote_guard",
+                )
+                existing = condition
+            if existing is not None:
+                existing_context = dict(existing.get("latest_context") or context)
+                duration = max(
+                    0.0,
+                    time.monotonic()
+                    - float(existing.get("first_seen_monotonic", time.monotonic())),
+                )
+                self._set_stage3_quote_guard_status(
+                    cycle,
+                    state="blocked",
+                    reason_code=str(existing.get("latest_reason_code") or normalized_reason),
+                    message=str(existing.get("latest_message") or message),
+                    context=existing_context,
+                    severity=(
+                        "warning"
+                        if duration >= self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS
+                        or bool(existing_context.get("near_trigger"))
+                        else "info"
+                    ),
+                )
+            else:
+                self._set_stage3_quote_guard_status(
+                    cycle,
+                    state="waiting_quote_update",
+                    reason_code=normalized_reason,
+                    message=message,
+                    context=context,
+                    severity="normal",
+                )
+            return
+
+        existing = self._audit_conditions.get(key)
+        near_trigger = bool(context.get("near_trigger"))
+        severe_codes = {
+            "FIELD_TRACKING_UNAVAILABLE",
+            "UPSTREAM_UNCONFIRMED",
+            "EVENT_IDENTITY_UNAVAILABLE",
+            "TRIGGER_UNAVAILABLE",
+        }
+        immediate_level: Optional[str] = None
+        immediate_message: Optional[str] = None
+        immediate_token: Optional[str] = None
+        if confirmation_was_pending:
+            immediate_level = "WARN"
+            immediate_token = f"confirmation_invalidated|{normalized_reason}"
+            immediate_message = (
+                "Stage-3 SELL confirmation was invalidated before the second qualifying quote: "
+                f"{message}"
+            )
+        elif near_trigger:
+            immediate_level = "WARN"
+            immediate_token = f"near_trigger|{normalized_reason}"
+            immediate_message = (
+                "Stage-3 SELL evidence is invalid while price is near or above the profit trigger: "
+                f"{message}"
+            )
+        elif normalized_reason in severe_codes:
+            immediate_level = "WARN"
+            immediate_token = f"severe|{normalized_reason}"
+            immediate_message = f"Stage-3 SELL evidence is unavailable: {message}"
+        elif (
+            existing is None
+            and self._stage3_routine_guard_entry_cycle_id != cycle.id
+        ):
+            immediate_level = "INFO"
+            immediate_token = "condition_started"
+            immediate_message = f"Stage-3 SELL evidence is temporarily unavailable: {message}"
+            self._stage3_routine_guard_entry_cycle_id = cycle.id
+
+        condition = self._update_audit_condition(
+            key=key,
+            family="Stage-3 SELL quote evidence",
+            reason_code=normalized_reason,
+            message=message,
+            cycle=cycle,
+            initial_delay_seconds=self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS,
+            repeat_interval_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+            summary_level="WARN",
+            immediate_level=immediate_level,
+            immediate_message=immediate_message,
+            immediate_token=immediate_token,
+            context=context,
+            kind="stage3_sell_quote_guard",
+        )
+        duration = max(
+            0.0,
+            time.monotonic()
+            - float(condition.get("first_seen_monotonic", time.monotonic())),
+        )
+        severity = (
+            "warning"
+            if near_trigger or normalized_reason in severe_codes
+            or duration >= self.DIAGNOSTIC_FIRST_SUMMARY_SECONDS
+            else "info"
+        )
+        self._set_stage3_quote_guard_status(
+            cycle,
+            state="blocked",
+            reason_code=normalized_reason,
+            message=message,
+            context=context,
+            severity=severity,
+        )
+
+    def _clear_stage3_quote_guard(
+        self,
+        cycle: Optional[CycleState],
+        *,
+        message: str = "",
+        state: str = "ready",
+        context: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if cycle is None:
+            self._stage3_quote_guard_status = {}
+            return
+        self._clear_audit_condition(
+            self._stage3_quote_guard_condition_key(cycle),
+            cycle=cycle,
+            recovery_message=message or "Fresh Stage-3 quote evidence is available.",
+            context=context,
+        )
+        reason_by_state = {
+            "waiting_below_trigger": "TRIGGER_NOT_REACHED",
+            "confirmation_pending": "CONFIRMATION_PENDING",
+            "confirmed": "CONFIRMED",
+            "ready": "OK",
+        }
+        self._set_stage3_quote_guard_status(
+            cycle,
+            state=state,
+            reason_code=reason_by_state.get(str(state or ""), "OK"),
+            message=message or "Fresh complete Stage-3 quote evidence is available.",
+            context=context,
+            severity="normal",
+        )
+
     def _confirm_stage3_sell_evidence(
         self,
         cycle: CycleState,
@@ -6996,28 +8088,55 @@ class TradingController:
         if cycle.stage == Stage.WAIT_RISE_TRIGGER and bool(
             (self.price_snapshot or {}).get("market_data_field_tracking")
         ):
-            evidence, guard_message = self._stage3_sell_quote_evidence(
+            evidence, guard_message, reason_code, guard_context = self._stage3_sell_quote_evidence_detail(
                 cycle,
                 require_latest_event=True,
             )
             if evidence is None:
+                confirmation_was_pending = bool(
+                    self._stage3_sell_confirmation
+                    and str(self._stage3_sell_confirmation.get("cycle_id") or "") == cycle.id
+                )
                 self._reset_stage3_sell_confirmation(cycle.id)
-                if guard_message and "does not confirm the rise trigger" not in guard_message:
-                    self._log_price_warning_throttled(
-                        cycle,
-                        f"Final SELL trigger not armed: {guard_message}",
-                        interval_seconds=30.0,
-                        throttle_key=f"stage3_sell_quote_guard|{cycle.id}|{guard_message}",
-                    )
+                self._observe_stage3_quote_guard(
+                    cycle,
+                    reason_code=reason_code,
+                    message=guard_message,
+                    context=guard_context,
+                    confirmation_was_pending=confirmation_was_pending,
+                )
                 # Keep the cycle's last actionable price rather than persisting
                 # a rejected convenience value such as an unchanged cached
-                # Last.  The GUI still displays the raw snapshot separately.
+                # Last. The GUI still displays the raw snapshot separately.
                 retained_price = self._positive_float(cycle.last_price) or float(last_price)
                 return self._stage3_waiting_cycle_with_price(cycle, retained_price), []
 
             reference_price = float(evidence["reference_price"])
             if not self._confirm_stage3_sell_evidence(cycle, evidence):
+                confirmation_count = 1 if self._stage3_sell_confirmation else 0
+                confirmation_context = dict(guard_context)
+                confirmation_context["confirmation_pending"] = True
+                confirmation_context["confirmation_count"] = confirmation_count
+                self._clear_stage3_quote_guard(
+                    cycle,
+                    state="confirmation_pending",
+                    message=(
+                        f"Fresh quote accepted; {confirmation_count} of "
+                        f"{self.STAGE3_SELL_CONFIRMATIONS_REQUIRED} confirmations received."
+                    ),
+                    context=confirmation_context,
+                )
                 return self._stage3_waiting_cycle_with_price(cycle, reference_price), []
+
+            confirmed_context = dict(guard_context)
+            confirmed_context["confirmation_pending"] = False
+            confirmed_context["confirmation_count"] = self.STAGE3_SELL_CONFIRMATIONS_REQUIRED
+            self._clear_stage3_quote_guard(
+                cycle,
+                state="confirmed",
+                message="Two fresh quote observations confirmed the final-SELL trigger.",
+                context=confirmed_context,
+            )
 
             next_cycle, actions = StrategyEngine.on_price_update(
                 cycle,
@@ -7424,6 +8543,12 @@ class TradingController:
                 self.storage.upsert_cycle(self.active_cycle)
                 self._log("WARN", connectivity_message, self.active_cycle)
             return
+        if rollback_side == "BUY":
+            self._clear_audit_condition(
+                f"buy_preflight_block|{cycle.id}",
+                cycle=cycle,
+                recovery_message="All BUY preflight checks are passing; order submission is proceeding.",
+            )
         try:
             self.storage.backup_database("before_order_submit")
         except Exception:
@@ -7571,6 +8696,12 @@ class TradingController:
                 self.storage.upsert_cycle(self.active_cycle)
                 self._log("WARN", connectivity_message, self.active_cycle)
             return
+        if rollback_side == "BUY":
+            self._clear_audit_condition(
+                f"buy_preflight_block|{cycle.id}",
+                cycle=cycle,
+                recovery_message="All BUY preflight checks are passing; order submission is proceeding.",
+            )
         try:
             self.storage.backup_database("before_order_submit")
         except Exception:
@@ -7761,11 +8892,75 @@ class TradingController:
             diagnostic_order_ref = cycle.protective_sell_order_ref
         else:
             diagnostic_order_ref = cycle.sell_order_ref
-        self._log_price_warning_throttled(
-            cycle,
-            f"Stage {cycle.stage.value} {side} trailing wait diagnostic: {details}",
-            interval_seconds=60.0,
-            throttle_key=f"native_trailing_wait|{cycle.id}|{side_key}|{diagnostic_order_ref or ''}",
+        selected_crossed = bool(diag.get("selected_crossed_displayed_initial_stop"))
+        raw_last_crossed = bool(diag.get("raw_last_crossed_displayed_initial_stop"))
+        if raw_last_crossed:
+            reason_code = "RAW_LAST_CROSSED"
+        elif selected_crossed:
+            reason_code = "SELECTED_PRICE_CROSSED"
+        elif raw_value in (None, ""):
+            reason_code = "RAW_LAST_UNAVAILABLE"
+        else:
+            reason_code = "WAITING_FOR_NATIVE_TRIGGER"
+        anomaly = bool(selected_crossed or raw_last_crossed)
+        condition_suffix = f"{cycle.id}|{side_key}|{diagnostic_order_ref or ''}"
+        wait_key = f"native_trailing_wait|{condition_suffix}"
+        anomaly_key = f"native_trailing_anomaly|{condition_suffix}"
+        context = {
+            "side": side_key,
+            "order_ref": diagnostic_order_ref or "",
+            "status": status or "",
+            "selected_price": selected,
+            "raw_last_value": raw_value,
+            "displayed_initial_stop": stop,
+            "selected_crossed": selected_crossed,
+            "raw_last_crossed": raw_last_crossed,
+        }
+        if anomaly:
+            # Keep the expected long-running wait and the unusual trigger-cross
+            # evidence as separate conditions. A transient crossing can then
+            # recover immediately without leaving the ordinary wait on a WARN
+            # cadence for the remainder of the broker order's lifetime.
+            self._update_audit_condition(
+                key=anomaly_key,
+                family=f"Stage {cycle.stage.value} {side} trailing-order trigger anomaly",
+                reason_code=reason_code,
+                message=details,
+                cycle=cycle,
+                initial_delay_seconds=self.DIAGNOSTIC_REPEAT_SUMMARY_SECONDS,
+                repeat_interval_seconds=self.NATIVE_ORDER_WAIT_SUMMARY_SECONDS,
+                summary_level="WARN",
+                first_summary_level="WARN",
+                immediate_level="WARN" if raw_last_crossed else "INFO",
+                immediate_message=(
+                    f"Stage {cycle.stage.value} {side} trailing-order diagnostic requires attention: {details}"
+                ),
+                context=context,
+                kind="native_order_anomaly",
+            )
+            return
+
+        self._clear_audit_condition(
+            anomaly_key,
+            cycle=cycle,
+            recovery_message=(
+                "The selected price and raw Last no longer cross the displayed "
+                "initial stop while the native order remains working."
+            ),
+            context=context,
+        )
+        self._update_audit_condition(
+            key=wait_key,
+            family=f"Stage {cycle.stage.value} {side} trailing-order wait",
+            reason_code=reason_code,
+            message=details,
+            cycle=cycle,
+            initial_delay_seconds=self.NATIVE_ORDER_WAIT_SUMMARY_SECONDS,
+            repeat_interval_seconds=self.NATIVE_ORDER_WAIT_SUMMARY_SECONDS,
+            summary_level="INFO",
+            first_summary_level="INFO",
+            context=context,
+            kind="native_order_wait",
         )
 
     def _handle_buy_order_poll(self, cycle: CycleState, polled: PolledOrderState) -> None:
@@ -8982,12 +10177,19 @@ class TradingController:
             tif=self.strategy.tif,
         )
 
-    def _log(self, level: str, message: str, cycle: Optional[CycleState] = None) -> None:
+    def _log(
+        self,
+        level: str,
+        message: str,
+        cycle: Optional[CycleState] = None,
+        *,
+        raw: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Record an event without allowing diagnostics to kill the worker."""
         ticker = cycle.ticker if cycle else None
         cycle_id = cycle.id if cycle else None
         try:
-            self.storage.add_event(level, message, ticker=ticker, cycle_id=cycle_id)
+            self.storage.add_event(level, message, ticker=ticker, cycle_id=cycle_id, raw=raw)
         except sqlite3.Error as exc:
             # Event logging uses the same SQLite store as cycle persistence. A
             # write failure therefore activates the same fail-closed recovery
@@ -9002,6 +10204,7 @@ class TradingController:
                     "message": message,
                     "ticker": ticker,
                     "cycle_id": cycle_id,
+                    "raw": raw,
                 },
             )
         try:

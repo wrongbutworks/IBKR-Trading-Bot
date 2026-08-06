@@ -1,6 +1,6 @@
 # Worker watchdog and automatic recovery
 
-This document defines the current v3.8.0 worker/storage supervision behavior. It preserves BouncyBot's single-controller-worker design. The corrective implementation does not add a broker worker, database-writer worker, service, daemon, or second trading process.
+This document defines the current v3.9.0 worker/storage supervision behavior. It preserves BouncyBot's single-controller-worker design. The corrective implementation does not add a broker worker, database-writer worker, service, daemon, or second trading process.
 
 ## Failure class addressed
 

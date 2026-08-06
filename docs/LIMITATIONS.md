@@ -1,6 +1,6 @@
 # Limitations and non-goals
 
-This document states the boundaries of v3.8.0. Treat each limitation as an operational constraint, not as a future guarantee.
+This document states the boundaries of v3.9.0. Treat each limitation as an operational constraint, not as a future guarantee.
 
 ## Strategy scope
 
@@ -13,7 +13,7 @@ This document states the boundaries of v3.8.0. Treat each limitation as an opera
 ## Execution limits
 
 - Native IBKR trailing orders trigger market-style execution. The displayed stop is not a guaranteed fill price.
-- The Stage-2 partial-BUY grace is fixed at 3.0 seconds in v3.8.0. It is not a persisted setting and cannot guarantee that a cancellation reaches IBKR before additional or complete fills occur.
+- The Stage-2 partial-BUY grace, introduced in v3.8.0, is fixed at 3.0 seconds. It is not a persisted setting and cannot guarantee that a cancellation reaches IBKR before additional or complete fills occur.
 - A configured minimum-profit percentage is a pre-submission stop-level condition. It does not guarantee net profit after slippage, gaps, partial fills, commissions, fees, or broker adjustments.
 - The optional slippage buffer changes planning math only. It is not a limit order and does not cap slippage.
 - The protective SELL cannot guarantee protection during gaps, market closures, halts, disconnections, rejection, or insufficient liquidity.
@@ -47,7 +47,7 @@ Use separate accounts or deliberate operating procedures when strict position se
 
 ## Contract, route, currency, and quantity limits
 
-- v3.8.0 supports only USD and EUR ordinary `STK` contracts selected from an exact IBKR API result. Other currencies and security types remain unsupported.
+- v3.9.0 supports only USD and EUR ordinary `STK` contracts selected from an exact IBKR API result. Other currencies and security types remain unsupported.
 - Order routing is `SMART` only. The primary exchange identifies the selected native listing; direct-routing workflows are not implemented.
 - “SMART supported” is capability-driven, not a guarantee for every listing or venue. BouncyBot requires the selected contract to advertise or accept SMART, `MKT`, `TRAIL`, market-rule pricing, whole-share quantity rules, and usable regular-session metadata. A missing capability blocks the contract.
 - Each portable SQLite database is single-currency. A zero-cycle draft can switch between USD and EUR, but the first persisted cycle locks the database. Mixed USD/EUR history and automatic FX conversion are not supported.
@@ -60,6 +60,7 @@ Use separate accounts or deliberate operating procedures when strict position se
 - When a market rule is advertised but unavailable or ambiguous, the application blocks submission rather than guessing. This can prevent an otherwise acceptable order until the broker metadata becomes available.
 - The what-if request is a broker preflight, not a reservation of buying power, price, route, or permission. A successful result does not guarantee live acceptance or execution.
 - Error callbacks can arrive before, during, or after order-status callbacks. The adapter retains a bounded short-lived race cache, but a process/network failure can still prevent some diagnostics from reaching local SQLite. Gateway/TWS logs remain an important external source.
+- Audit-condition coalescing is an in-memory diagnostic facility. It deliberately suppresses duplicate SQLite rows, not guard evaluation. A process restart resets the coalescer, so a still-active condition can create a new entry event. Summary cadence is not a guarantee that every intermediate age, retry count, or price will be persisted; the GUI and structured summary context carry the current/latest evidence.
 - `Inactive` is treated as a structural no-fill failure for an app-owned BUY and stops the cycle. An unusual broker workflow that uses `Inactive` for a benign condition therefore requires manual review rather than automatic continuation.
 
 ## Availability and recovery limits
@@ -103,4 +104,4 @@ Use separate accounts or deliberate operating procedures when strict position se
 
 ## Multi-instance ownership boundary
 
-Multiple BouncyBot copies can share a Master API feed. v3.8.0 rejects attribution of any order or callback whose complete `OrderRef` is not already persisted locally. This prevents one installation from acting on another installation's app-prefixed order, but it also means a lost or replaced local database can require manual recovery instead of broad prefix-based discovery.
+Multiple BouncyBot copies can share a Master API feed. v3.9.0 rejects attribution of any order or callback whose complete `OrderRef` is not already persisted locally. This prevents one installation from acting on another installation's app-prefixed order, but it also means a lost or replaced local database can require manual recovery instead of broad prefix-based discovery.
