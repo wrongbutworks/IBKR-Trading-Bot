@@ -1,7 +1,7 @@
 # BouncyBot - an IBKR Portable Trading Bot 
 
 <p align="center">
-  <img src="Images/BouncyBot_logo.png" alt="BouncyBot logo" width="640" />
+  <img src="Images/BouncyBot_app_icon.png" alt="BouncyBot logo" width="640" />
 </p>
 
 **Current release: v3.9.0**
